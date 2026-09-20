@@ -155,6 +155,171 @@ class PRDExtraction(BaseModel):
         return cls.model_validate(data)
 
 
+class ImportInfo(BaseModel):
+    """Information about a Python import statement."""
+
+    module: str = Field(
+        ...,
+        description="The imported module name.",
+    )
+    alias: Optional[str] = Field(
+        None,
+        description="The import alias, if any.",
+    )
+    line: int = Field(
+        ...,
+        description="Line number where the import appears.",
+    )
+    is_stdlib: bool = Field(
+        False,
+        description="Whether this is a standard library module.",
+    )
+    is_third_party: bool = Field(
+        False,
+        description="Whether this is a third-party package.",
+    )
+    is_local: bool = Field(
+        False,
+        description="Whether this is a local module import.",
+    )
+
+
+
+class FunctionInfoAST(BaseModel):
+    """Information about a Python function extracted via AST."""
+
+    name: str = Field(
+        ...,
+        description="The function name.",
+    )
+    line: int = Field(
+        ...,
+        description="Line number where the function starts.",
+    )
+    col: int = Field(
+        ...,
+        description="Column offset where the function starts.",
+    )
+    end_line: int = Field(
+        ...,
+        description="Line number where the function ends.",
+    )
+    end_col: int = Field(
+        ...,
+        description="Column offset where the function ends.",
+    )
+    args: List[str] = Field(
+        default_factory=list,
+        description="List of argument names (excluding 'self'/'cls').",
+    )
+    returns: Optional[str] = Field(
+        None,
+        description="Return type annotation, if any.",
+    )
+    is_async: bool = Field(
+        False,
+        description="Whether the function is async.",
+    )
+    is_method: bool = Field(
+        False,
+        description="Whether this is a method (inside a class).",
+    )
+    class_name: Optional[str] = Field(
+        None,
+        description="Name of the containing class, if any.",
+    )
+
+
+class MethodInfoAST(FunctionInfoAST):
+    """Information about a Python method extracted via AST."""
+
+    pass
+
+
+class ClassInfoAST(BaseModel):
+    """Information about a Python class extracted via AST."""
+
+    name: str = Field(
+        ...,
+        description="The class name.",
+    )
+    line: int = Field(
+        ...,
+        description="Line number where the class starts.",
+    )
+    col: int = Field(
+        ...,
+        description="Column offset where the class starts.",
+    )
+    end_line: int = Field(
+        ...,
+        description="Line number where the class ends.",
+    )
+    end_col: int = Field(
+        ...,
+        description="Column offset where the class ends.",
+    )
+    bases: List[str] = Field(
+        default_factory=list,
+        description="List of base class names.",
+    )
+    decorator_names: List[str] = Field(
+        default_factory=list,
+        description="List of decorator names applied to the class.",
+    )
+    methods: List[MethodInfoAST] = Field(
+        default_factory=list,
+        description="List of methods defined within this class.",
+    )
+
+
+class structural_context_contextAST(BaseModel):
+    """Root container for all extracted structural context from AST parsing."""
+
+    filename: str = Field(
+        ...,
+        description="Name of the file that was parsed.",
+    )
+    imports: List[ImportInfo] = Field(
+        default_factory=list,
+        description="List of import statements found.",
+    )
+    classes: List[ClassInfoAST] = Field(
+        default_factory=list,
+        description="List of class definitions found.",
+    )
+    functions: List[FunctionInfoAST] = Field(
+        default_factory=list,
+        description="List of top-level function definitions found.",
+    )
+    raw_source: Optional[str] = Field(
+        None,
+        description="Optional raw source text that was parsed.",
+    )
+
+
+class ASTExtractionResult(BaseModel):
+    """Result of AST-based source code extraction."""
+
+    structural_context: structural_context_contextAST = Field(
+        ...,
+        description="The extracted structural context.",
+    )
+    success: bool = Field(
+        True,
+        description="Whether the extraction succeeded.",
+    )
+    error_message: Optional[str] = Field(
+        None,
+        description="Error message if extraction failed.",
+    )
+
+    class Config:
+        """Pydantic configuration."""
+
+        use_enum_values = True
+
+
 # JSON Schema for output validation (standalone, can be used outside Pydantic)
 PRD_EXTRACTION_SCHEMA: Dict[str, Any] = {
     "type": "object",

@@ -10,6 +10,12 @@ Usage:
 
     # From text directly
     result = parse_prd_from_text(prd_text, source_format="markdown")
+
+    # From Python source code (AST-based structural extraction)
+    from prd_parser import parse_python_from_source
+    result = parse_python_from_source(sample_python_code)
+    print(result.structural_context.imports)
+    print(result.structural_context.classes)
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from typing import Optional
 from prd_parser.extractor import Extractor
 from prd_parser.models import PRDExtraction, PRD_EXTRACTION_SCHEMA
 from prd_parser.parsers import MarkdownPRDParser, PDFPRDParser
+from prd_parser.ast_parser import extract_structural_context
 
 logger = logging.getLogger(__name__)
 
@@ -139,3 +146,36 @@ def validate_prd_json(json_data: dict) -> PRDExtraction:
     extraction.validate_json_schema(extraction.to_json())
 
     return extraction
+
+
+def parse_python_from_source(
+    source: str,
+    filename: str = "<string>",
+) -> ASTExtractionResult:
+    """Extract structural context from Python source code using AST parsing.
+
+    Args:
+        source: Python source code as a string.
+        filename: Name of the file being parsed (for error reporting).
+
+    Returns:
+        ASTExtractionResult containing the extracted structural context
+        including imports, classes, functions, and their relationships.
+    """
+    try:
+        result = extract_structural_context(source, filename)
+        if result.success:
+            logger.info(
+                f"Successfully parsed Python source '{filename}': "
+                f"{len(result.structural_context.imports)} imports, "
+                f"{len(result.structural_context.classes)} classes, "
+                f"{len(result.structural_context.functions)} functions"
+            )
+        return result
+    except Exception as e:
+        logger.error(f"Failed to parse Python source '{filename}': {e}")
+        return ASTExtractionResult(
+            structural_context=None,  # type: ignore[arg-type]
+            success=False,
+            error_message=str(e),
+        )
