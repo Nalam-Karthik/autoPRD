@@ -2,13 +2,14 @@
 
 Parses Python source code using the built-in `ast` module and extracts
 structural information such as imports, class definitions, function
-definitions, and their hierarchical relationships.
+definitions, docstrings, and logic blocks.
 """
 
 from __future__ import annotations
 
 import ast
 import keyword
+import os
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
@@ -40,6 +41,7 @@ class FunctionInfo:
     is_async: bool = False
     is_method: bool = False
     class_name: Optional[str] = None
+    docstring: str = ""
 
 
 @dataclass
@@ -61,6 +63,20 @@ class ClassInfo:
     methods: List[MethodInfo] = field(default_factory=list)
     bases: List[str] = field(default_factory=list)
     decorator_names: List[str] = field(default_factory=list)
+    docstring: str = ""
+
+
+@dataclass
+class LogicBlock:
+    """A logic block extracted from Python source code (e.g., if, for, while, try)."""
+
+    block_type: str = ""
+    line: int = 0
+    end_line: int = 0
+    col: int = 0
+    end_col: int = 0
+    condition: str = ""
+    variable: str = ""
 
 
 @dataclass
@@ -71,6 +87,7 @@ class structural_context_context:
     imports: List[ImportInfo] = field(default_factory=list)
     classes: List[ClassInfo] = field(default_factory=list)
     functions: List[FunctionInfo] = field(default_factory=list)
+    logic_blocks: List[LogicBlock] = field(default_factory=list)
     raw_source: str = ""
 
 
@@ -108,7 +125,6 @@ class ASTParser:
             "argparse",
             "array",
             "base64",
-            "binascii",
             "binascii",
             "calendar",
             "collections",
@@ -205,6 +221,21 @@ class ASTParser:
             elif isinstance(node, ast.FunctionDef):
                 func_info = self._extract_function(node)
                 context.functions.append(func_info)
+            elif isinstance(node, ast.If):
+                block_info = self._extract_logic_block(node)
+                context.logic_blocks.append(block_info)
+            elif isinstance(node, ast.For):
+                block_info = self._extract_logic_block(node)
+                context.logic_blocks.append(block_info)
+            elif isinstance(node, ast.While):
+                block_info = self._extract_logic_block(node)
+                context.logic_blocks.append(block_info)
+            elif isinstance(node, ast.Try):
+                block_info = self._extract_logic_block(node)
+                context.logic_blocks.append(block_info)
+            elif isinstance(node, ast.With):
+                block_info = self._extract_logic_block(node)
+                context.logic_blocks.append(block_info)
 
         return ASTExtractionResult(structural_context=context, success=True)
 
@@ -265,7 +296,7 @@ class ASTParser:
         # Extract methods defined directly in this class (not inherited)
         for item in node.body:
             if isinstance(item, ast.FunctionDef):
-                # Skip dunder methods for cleaner output, or include them all
+                # Skip dunder methods for cleaner output
                 is_dunder = item.name.startswith("__") and item.name.endswith("__")
                 if not is_dunder:
                     meth_info = self._extract_method(item, node.name)
@@ -286,6 +317,12 @@ class ASTParser:
             elif isinstance(dec, ast.Constant):
                 decorator_names.append(str(dec.value))
 
+        # Extract docstring
+        docstring = ""
+        if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+            if isinstance(node.body[0].value.value, str):
+                docstring = node.body[0].value.value
+
         return ClassInfo(
             name=node.name,
             line=node.lineno,
@@ -295,6 +332,7 @@ class ASTParser:
             methods=methods,
             bases=bases,
             decorator_names=decorator_names,
+            docstring=docstring,
         )
 
     def _extract_method(self, node: ast.FunctionDef, class_name: str) -> MethodInfo:
@@ -317,6 +355,12 @@ class ASTParser:
 
         is_async = isinstance(node, ast.AsyncFunctionDef)  # type: ignore
 
+        # Extract docstring
+        docstring = ""
+        if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+            if isinstance(node.body[0].value.value, str):
+                docstring = node.body[0].value.value
+
         return MethodInfo(
             name=node.name,
             line=node.lineno,
@@ -328,6 +372,7 @@ class ASTParser:
             is_async=is_async,
             is_method=True,
             class_name=class_name,
+            docstring=docstring,
         )
 
     def _extract_function(self, node: ast.FunctionDef) -> FunctionInfo:
@@ -347,6 +392,12 @@ class ASTParser:
 
         is_async = isinstance(node, ast.AsyncFunctionDef)  # type: ignore
 
+        # Extract docstring
+        docstring = ""
+        if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+            if isinstance(node.body[0].value.value, str):
+                docstring = node.body[0].value.value
+
         return FunctionInfo(
             name=node.name,
             line=node.lineno,
@@ -357,6 +408,7 @@ class ASTParser:
             returns=returns,
             is_async=is_async,
             is_method=False,
+            docstring=docstring,
         )
 
     @staticmethod
@@ -371,6 +423,48 @@ class ASTParser:
             parts.append(current.id)
         parts.reverse()
         return ".".join(parts)
+
+    def _extract_logic_block(self, node: ast.AST) -> LogicBlock:
+        """Extract logic block information from an AST node."""
+        block_type = ""
+
+        if isinstance(node, ast.If):
+            block_type = "if"
+        elif isinstance(node, ast.For):
+            block_type = "for"
+        elif isinstance(node, ast.While):
+            block_type = "while"
+        elif isinstance(node, ast.Try):
+            block_type = "try"
+        elif isinstance(node, ast.ExceptHandler):
+            block_type = "except"
+        elif isinstance(node, ast.With):
+            block_type = "with"
+
+        # Extract condition for if/while/try blocks
+        condition = ""
+        if isinstance(node, ast.If):
+            if node.test:
+                condition = ast.unparse(node.test)
+        elif isinstance(node, (ast.For, ast.While)):
+            if node.condition:
+                condition = ast.unparse(node.condition)
+
+        # Extract loop variable for for-blocks
+        variable = ""
+        if isinstance(node, ast.For):
+            if node.target:
+                variable = node.target.id if isinstance(node.target, ast.Name) else ast.unparse(node.target)
+
+        return LogicBlock(
+            block_type=block_type,
+            line=node.lineno,
+            end_line=node.end_lineno,
+            col=node.col_offset,
+            end_col=node.end_col_offset,
+            condition=condition,
+            variable=variable,
+        )
 
 
 def extract_structural_context(
@@ -400,10 +494,12 @@ from datetime import datetime
 # Third-party
 import numpy as np
 
+
 class User:
     """User model."""
 
     def __init__(self, name: str, email: str) -> None:
+        """Initialize a user."""
         self.name = name
         self.email = email
 
@@ -426,10 +522,21 @@ class MathUtils:
     PI = 3.14159
 
     def add(self, a: float, b: float) -> float:
+        """Add two numbers."""
         return a + b
 
     def multiply(self, a: float, b: float) -> float:
         return a * b
+
+
+if __name__ == "__main__":
+    print("Hello, world!")
+
+    for i in range(5):
+        print(i)
+
+    while True:
+        break
 '''
 
     result = extract_structural_context(sample_code, "sample.py")
@@ -452,6 +559,7 @@ class MathUtils:
             print(f"    Bases: {cls.bases}")
             print(f"    Methods: {[m.name for m in cls.methods]}")
             print(f"    Decorators: {cls.decorator_names}")
+            print(f"    Docstring: {cls.docstring[:50] if cls.docstring else 'None'}...")
         print(f"\nFunctions ({len(ctx.functions)}):")
         for func in ctx.functions:
             print(f"  {func.name} (line {func.line})" + (f" async" if func.is_async else ""))
@@ -459,5 +567,11 @@ class MathUtils:
                 print(f"    Args: {func.args}")
             if func.returns:
                 print(f"    Returns: {func.returns}")
+            print(f"    Docstring: {func.docstring[:50] if func.docstring else 'None'}...")
+        print(f"\nLogic Blocks ({len(ctx.logic_blocks)}):")
+        for block in ctx.logic_blocks:
+            print(f"  {block.block_type} (line {block.line})")
+            print(f"    Condition: {block.condition[:60] if block.condition else 'None'}...")
+            print(f"    Variable: {block.variable if block.variable else 'None'}...")
     else:
         print(f"Error: {result.error_message}")

@@ -185,6 +185,39 @@ class ImportInfo(BaseModel):
 
 
 
+class LogicBlock(BaseModel):
+    """A logic block extracted from Python source code (e.g., if, for, while, try)."""
+
+    block_type: str = Field(
+        ...,
+        description="Type of block: 'if', 'for', 'while', 'try', 'except', 'finally', 'with'.",
+    )
+    line: int = Field(
+        ...,
+        description="Line number where the block starts.",
+    )
+    end_line: int = Field(
+        ...,
+        description="Line number where the block ends.",
+    )
+    col: int = Field(
+        ...,
+        description="Column offset where the block starts.",
+    )
+    end_col: int = Field(
+        ...,
+        description="Column offset where the block ends.",
+    )
+    condition: Optional[str] = Field(
+        None,
+        description="Condition text for if/while blocks, if available.",
+    )
+    variable: Optional[str] = Field(
+        None,
+        description="Loop variable name for for-blocks, if available.",
+    )
+
+
 class FunctionInfoAST(BaseModel):
     """Information about a Python function extracted via AST."""
 
@@ -228,12 +261,57 @@ class FunctionInfoAST(BaseModel):
         None,
         description="Name of the containing class, if any.",
     )
+    docstring: Optional[str] = Field(
+        None,
+        description="The function's docstring, if present.",
+    )
 
 
 class MethodInfoAST(FunctionInfoAST):
     """Information about a Python method extracted via AST."""
 
     pass
+
+
+class ClassInfoAST(BaseModel):
+    """Information about a Python class extracted via AST."""
+
+    name: str = Field(
+        ...,
+        description="The class name.",
+    )
+    line: int = Field(
+        ...,
+        description="Line number where the class starts.",
+    )
+    col: int = Field(
+        ...,
+        description="Column offset where the class starts.",
+    )
+    end_line: int = Field(
+        ...,
+        description="Line number where the class ends.",
+    )
+    end_col: int = Field(
+        ...,
+        description="Column offset where the class ends.",
+    )
+    bases: List[str] = Field(
+        default_factory=list,
+        description="List of base class names.",
+    )
+    decorator_names: List[str] = Field(
+        default_factory=list,
+        description="List of decorator names applied to the class.",
+    )
+    methods: List[MethodInfoAST] = Field(
+        default_factory=list,
+        description="List of methods defined within this class.",
+    )
+    docstring: Optional[str] = Field(
+        None,
+        description="The class's docstring, if present.",
+    )
 
 
 class ClassInfoAST(BaseModel):
@@ -291,6 +369,10 @@ class structural_context_contextAST(BaseModel):
     functions: List[FunctionInfoAST] = Field(
         default_factory=list,
         description="List of top-level function definitions found.",
+    )
+    logic_blocks: List[LogicBlock] = Field(
+        default_factory=list,
+        description="List of logic blocks (if, for, while, try, etc.) found.",
     )
     raw_source: Optional[str] = Field(
         None,
