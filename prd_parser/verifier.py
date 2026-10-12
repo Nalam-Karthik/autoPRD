@@ -177,8 +177,8 @@ def _detect_discrepancies(prd_dict: Dict[str, Any], code_ctx: Any) -> List[Dict[
         )
 
     # Check functional specification vs code functions
-    spec = _safe_get(prd_dict, "functional_specification", {}).get("specification", "")
-    spec_lower = spec.lower() if spec else ""
+    spec = _safe_get(prd_dict, "functional_specification", "")
+    spec_lower = str(spec).lower() if spec else ""
     functions = _safe_get(code_ctx, "functions", []) if code_ctx else []
 
     for func in functions:
