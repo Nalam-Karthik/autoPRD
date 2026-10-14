@@ -23,12 +23,7 @@ from pydantic import BaseModel, Field
 from prd_parser.ast_parser import extract_structural_context
 from prd_parser.code_test_generator import CodeTestPromptEngine, extract_structural_context_from_result
 from prd_parser.verifier import verify
-from prd_parser.models import (
-    PRDExtraction,
-    FunctionalSpecification,
-    AcceptanceCriterion,
-    EdgeCaseAssumption,
-)
+from prd_parser.models import PRDExtraction, FunctionalSpecification, AcceptanceCriterion, EdgeCaseAssumption
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -142,53 +137,68 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# Helper async functions
+# Helper functions
 # ---------------------------------------------------------------------------
 
 def _parse_prd_text(prd_text: str, source_format: str = "pdf") -> Dict[str, Any]:
-    """Parse PRD text into structured dict."""
-    from prd_parser.models import EdgeCaseAssumption
+    """Parse PRD text into structured dict.
 
-    # Very simplified extraction - in production would use LLM or dedicated parsers
-    text = prd_text.strip()
-
+    Very simplified extraction - in production would use LLM or dedicated parsers.
+    """
     # Try to find requirement ID pattern
-    import re as re_mod
     requirement_id = "REQ-001"  # default
-    match = re_mod.search(r"[Rr]eq[-_]?(\d{3,})", text)
+    match = re.search(r"[Rr]eq[-_]?(\d{3,})", prd_text)
     if match:
         candidate = f"REQ-{match.group(1)}"
         # Validate format: must match REQ-NNN pattern
-        if re_mod.match(r"^REQ-\d{3,}$", candidate):
+        if re.match(r"^REQ-\d{3,}$", candidate):
             requirement_id = candidate
 
     # Extract functional spec (first sentence-ish line)
     spec = ""
-    sentences = [s.strip() for s in text.split(". ") if s.strip()]
+    sentences = [s.strip() for s in prd_text.split(". ") if s.strip()]
     if sentences:
         spec = sentences[0][:100]
 
-    # Extract acceptance criteria (lines starting with Given/When/Then)
+    # Extract acceptance criteria (numbered lines starting with Given/When/Then)
     acceptance_criteria: List[str] = []
-    for line in text.split("\n"):
+    for line in prd_text.split("\n"):
         line_stripped = line.strip()
-        if line_stripped.startswith(("Given ", "When ", "Then ")):
-            acceptance_criteria.append(line_stripped)
+        # Match numbered criteria like '1. Given ...' - capture just the number+period, get remainder
+        m = re.match(r"^\d+\.", line_stripped)
+        if m:
+            # Get the remainder after the number+period (skip the space too)
+            remainder = line_stripped[m.end() :].lstrip()
+            if remainder.startswith(("Given ", "When ", "Then ")):
+                acceptance_criteria.append(line_stripped)
 
-    # Extract edge case assumptions
+    # Extract edge case assumptions (lines after "### Edge Case Assumptions" heading)
     edge_case_assumptions: List[Dict[str, str]] = []
-    for line in text.split("\n"):
-        line_stripped = line.strip().lower()
-        if "assumption" in line_stripped or "edge case" in line_stripped:
-            edge_case_assumptions.append(
-                {
-                    "assumption": line_stripped,
-                    "context": "",
-                    "impact": "",
-                }
-            )
+    in_edge_section = False
+    for line in prd_text.split("\n"):
+        line_stripped = line.strip()
+        # Detect the start of the edge case section
+        if re.match(r"^###+\s*Edge Case", line_stripped, re.IGNORECASE):
+            in_edge_section = True
+            continue
+        # If we're in the edge section and hit another heading, stop
+        if in_edge_section and re.match(r"^###", line_stripped):
+            in_edge_section = False
+            continue
+        # Collect assumption lines within the edge section
+        if in_edge_section and line_stripped:
+            # Skip heading lines within the section
+            if not re.match(r"^###", line_stripped) and not re.match(r"^\d+\.", line_stripped):
+                # Check if it looks like an assumption
+                if ("assumption" in line_stripped.lower() or "concurrent" in line_stripped.lower() or "missing" in line_stripped.lower()):
+                    edge_case_assumptions.append(
+                        {
+                            "assumption": line_stripped,
+                            "context": "",
+                            "impact": "",
+                        }
+                    )
 
-    # Return a dict that can be used to construct PRDExtraction
     return {
         "requirement_id": requirement_id,
         "functional_specification": spec,
@@ -208,7 +218,7 @@ def _generate_tests(prd_dict: Dict[str, Any], code_source: str, language: str = 
 
     # Ensure specification is not empty
     spec = prd_dict.get("functional_specification", "") or "User functionality"
-    
+
     parsed_prd = PRDExtraction(
         requirement_id=prd_dict.get("requirement_id", "REQ-001"),
         functional_specification=FunctionalSpecification(
@@ -247,14 +257,40 @@ def _generate_tests(prd_dict: Dict[str, Any], code_source: str, language: str = 
 
 def _validate_code(prd_dict: Dict[str, Any], code_ctx_dict: Dict[str, Any]) -> Dict[str, Any]:
     """Validate generated tests against PRD requirements."""
-    result = verify(prd_dict, prd_dict.get("generated_tests", {}), code_ctx_dict)
+    # Convert dict to PRDExtraction for verification
+    from prd_parser.models import PRDExtraction, FunctionalSpecification, AcceptanceCriterion
+
+    # Build PRDExtraction from dict
+    prd = PRDExtraction(
+        requirement_id=prd_dict.get("requirement_id", "REQ-001"),
+        functional_specification=FunctionalSpecification(
+            specification=prd_dict.get("functional_specification", ""),
+            category=prd_dict.get("category", ""),
+            complexity=prd_dict.get("complexity", ""),
+        ),
+        acceptance_criteria=[
+            AcceptanceCriterion(criterion=c) for c in prd_dict.get("acceptance_criteria", [])
+        ],
+        edge_case_assumptions=[
+            EdgeCaseAssumption(
+                assumption=a.get("assumption", ""), context=a.get("context", ""), impact=a.get("impact", "")
+            )
+            for a in prd_dict.get("edge_case_assumptions", [])
+        ],
+        source_format=prd_dict.get("source_format", "pdf"),
+    )
+
+    # Convert dict to have generated_tests key
+    test_data = prd_dict.copy()
+    test_data["generated_tests"] = prd_dict.get("generated_tests", {})
+
+    result = verify(prd, test_data["generated_tests"], code_ctx_dict)
     return result
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
-
 
 @app.post(
     "/parse-prd",
@@ -367,13 +403,3 @@ async def validate_code_endpoint(
 async def health_check() -> Dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok", "message": "PRD-to-Code API is running"}
-
-
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run("prd_parser.api:app", host="127.0.0.1", port=8000, reload=True)
