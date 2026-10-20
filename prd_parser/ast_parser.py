@@ -218,24 +218,15 @@ class ASTParser:
             if isinstance(node, ast.ClassDef):
                 class_info = self._extract_class(node)
                 context.classes.append(class_info)
-            elif isinstance(node, ast.FunctionDef):
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 func_info = self._extract_function(node)
                 context.functions.append(func_info)
-            elif isinstance(node, ast.If):
-                block_info = self._extract_logic_block(node)
-                context.logic_blocks.append(block_info)
-            elif isinstance(node, ast.For):
-                block_info = self._extract_logic_block(node)
-                context.logic_blocks.append(block_info)
-            elif isinstance(node, ast.While):
-                block_info = self._extract_logic_block(node)
-                context.logic_blocks.append(block_info)
-            elif isinstance(node, ast.Try):
-                block_info = self._extract_logic_block(node)
-                context.logic_blocks.append(block_info)
-            elif isinstance(node, ast.With):
-                block_info = self._extract_logic_block(node)
-                context.logic_blocks.append(block_info)
+
+        # Logic blocks can live at module level or inside functions/methods.
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.If, ast.For, ast.While, ast.Try, ast.With)):
+                context.logic_blocks.append(self._extract_logic_block(node))
+        context.logic_blocks.sort(key=lambda block: block.line)
 
         return ASTExtractionResult(structural_context=context, success=True)
 
@@ -295,7 +286,7 @@ class ASTParser:
 
         # Extract methods defined directly in this class (not inherited)
         for item in node.body:
-            if isinstance(item, ast.FunctionDef):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 # Skip dunder methods for cleaner output
                 is_dunder = item.name.startswith("__") and item.name.endswith("__")
                 if not is_dunder:
@@ -347,11 +338,11 @@ class ASTParser:
                     args.append(arg.arg)
 
         returns = None
-        if node.returns:
-            if isinstance(node.returns, ast.Constant):
-                returns = str(node.returns.value)
-            elif isinstance(node.returns, ast.Name):
-                returns = node.returns.id
+        if node.returns is not None:
+            try:
+                returns = ast.unparse(node.returns)
+            except Exception:  # pragma: no cover - defensive for exotic nodes
+                returns = None
 
         is_async = isinstance(node, ast.AsyncFunctionDef)  # type: ignore
 
@@ -384,11 +375,11 @@ class ASTParser:
                 args.append(arg.arg)
 
         returns = None
-        if node.returns:
-            if isinstance(node.returns, ast.Constant):
-                returns = str(node.returns.value)
-            elif isinstance(node.returns, ast.Name):
-                returns = node.returns.id
+        if node.returns is not None:
+            try:
+                returns = ast.unparse(node.returns)
+            except Exception:  # pragma: no cover - defensive for exotic nodes
+                returns = None
 
         is_async = isinstance(node, ast.AsyncFunctionDef)  # type: ignore
 
@@ -443,12 +434,11 @@ class ASTParser:
 
         # Extract condition for if/while/try blocks
         condition = ""
-        if isinstance(node, ast.If):
-            if node.test:
-                condition = ast.unparse(node.test)
-        elif isinstance(node, (ast.For, ast.While)):
-            if node.condition:
-                condition = ast.unparse(node.condition)
+        if isinstance(node, (ast.If, ast.While)):
+            condition = ast.unparse(node.test)
+        elif isinstance(node, ast.For):
+            # For-loops have an iterable rather than a condition.
+            condition = ast.unparse(node.iter)
 
         # Extract loop variable for for-blocks
         variable = ""

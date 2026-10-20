@@ -148,11 +148,19 @@ class PRDExtraction(BaseModel):
             "raw_text_snippet": self.raw_text_snippet,
         }
 
-    def model_validate_json(cls, json_str: str) -> PRDExtraction:
-        """Validate and parse from JSON string."""
-        import json
-        data = json.loads(json_str)
-        return cls.model_validate(data)
+    def validate_json_schema(self, json_data: Optional[Dict[str, Any]] = None) -> bool:
+        """Validate this extraction (or a raw dict) against PRD_EXTRACTION_SCHEMA.
+
+        Returns True when valid and raises ValueError otherwise.
+        """
+        from jsonschema import ValidationError, validate
+
+        instance = self.to_json() if json_data is None else json_data
+        try:
+            validate(instance=instance, schema=PRD_EXTRACTION_SCHEMA)
+        except ValidationError as exc:
+            raise ValueError(f"JSON Schema validation failed: {exc.message}") from exc
+        return True
 
 
 class ImportInfo(BaseModel):
@@ -311,43 +319,6 @@ class ClassInfoAST(BaseModel):
     docstring: Optional[str] = Field(
         None,
         description="The class's docstring, if present.",
-    )
-
-
-class ClassInfoAST(BaseModel):
-    """Information about a Python class extracted via AST."""
-
-    name: str = Field(
-        ...,
-        description="The class name.",
-    )
-    line: int = Field(
-        ...,
-        description="Line number where the class starts.",
-    )
-    col: int = Field(
-        ...,
-        description="Column offset where the class starts.",
-    )
-    end_line: int = Field(
-        ...,
-        description="Line number where the class ends.",
-    )
-    end_col: int = Field(
-        ...,
-        description="Column offset where the class ends.",
-    )
-    bases: List[str] = Field(
-        default_factory=list,
-        description="List of base class names.",
-    )
-    decorator_names: List[str] = Field(
-        default_factory=list,
-        description="List of decorator names applied to the class.",
-    )
-    methods: List[MethodInfoAST] = Field(
-        default_factory=list,
-        description="List of methods defined within this class.",
     )
 
 

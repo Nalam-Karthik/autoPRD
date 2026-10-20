@@ -28,26 +28,24 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 from prd_parser.extractor import Extractor
 from prd_parser.models import PRDExtraction, PRD_EXTRACTION_SCHEMA
 from prd_parser.parsers import MarkdownPRDParser, PDFPRDParser
-from prd_parser.ast_parser import extract_structural_context, ASTParser
+from prd_parser.ast_parser import (
+    ASTExtractionResult,
+    ASTParser,
+    extract_structural_context,
+    structural_context_context,
+)
 
 logger = logging.getLogger(__name__)
 
 
-# Singleton extractor instance — lazy-initialized
-_extractor: Optional[Extractor] = None
-
-
-def _get_extractor() -> Extractor:
-    """Return a singleton Extractor instance (lazy init)."""
-    global _extractor
-    if _extractor is None:
-        _extractor = Extractor(model_name="gpt-4o-mini")
-    return _extractor
+def _get_extractor(llm_client=None, model_name: str = "gpt-4o-mini") -> Extractor:
+    """Create an Extractor using the supplied client and model."""
+    return Extractor(llm_client=llm_client, model_name=model_name)
 
 
 def parse_prd_from_file(
@@ -90,9 +88,11 @@ def parse_prd_from_file(
             "Supported formats: .pdf, .md, .markdown"
         )
 
-    # Extract structured data using LLM
-    extractor = _get_extractor() if _extractor else Extractor(model_name=model_name)
-    extraction = extractor.extract(prd_text=parse_result.text, source_format=parse_result.source_format)
+    # Extract structured data using the configured LLM
+    extractor = _get_extractor(llm_client=llm_client, model_name=model_name)
+    extraction = extractor.extract(
+        prd_text=parse_result.text, source_format=parse_result.source_format
+    )
 
     # Also validate against standalone JSON schema for extra safety
     try:
@@ -121,7 +121,7 @@ def parse_prd_from_text(
     Returns:
         PRDExtraction instance with all extracted fields.
     """
-    extractor = _get_extractor() if _extractor else Extractor(model_name=model_name)
+    extractor = _get_extractor(llm_client=llm_client, model_name=model_name)
     extraction = extractor.extract(prd_text=prd_text, source_format=source_format)
 
     # Validate against standalone JSON schema
@@ -182,7 +182,7 @@ def parse_python_from_source(
     except Exception as e:
         logger.error(f"Failed to parse Python source '{filename}': {e}")
         return ASTExtractionResult(
-            structural_context=None,  # type: ignore[arg-type]
+            structural_context=structural_context_context(filename=filename),
             success=False,
             error_message=str(e),
         )
@@ -211,7 +211,7 @@ def parse_python_file(
     except Exception as e:
         logger.error(f"Failed to parse Python file '{file_path}': {e}")
         return ASTExtractionResult(
-            structural_context=None,  # type: ignore[arg-type]
+            structural_context=structural_context_context(filename=str(file_path)),
             success=False,
             error_message=str(e),
         )
@@ -239,9 +239,13 @@ def parse_python_directory(
         raise ValueError(f"Not a directory: {dir_path}")
 
     results: List[ASTExtractionResult] = []
-    search_pattern = include_pattern if "*" in include_pattern else f"**/{include_pattern}"
+    pattern = include_pattern if "*" in include_pattern else "*.py"
 
-    files = list(dir_path.rglob("*.py")) if recursive else list(dir_path.glob("*.py"))
+    files = (
+        sorted(dir_path.rglob(pattern))
+        if recursive
+        else sorted(dir_path.glob(pattern))
+    )
 
     for file_path in sorted(files):
         try:

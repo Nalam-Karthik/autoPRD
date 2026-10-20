@@ -34,6 +34,48 @@ def _format_list(items: List[str]) -> str:
     return " ".join(items) if items else ""
 
 
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "be",
+    "can",
+    "created",
+    "for",
+    "from",
+    "given",
+    "has",
+    "have",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "should",
+    "that",
+    "the",
+    "their",
+    "then",
+    "this",
+    "to",
+    "user",
+    "when",
+    "will",
+    "with",
+}
+
+
+def _normalise_terms(text: str) -> set[str]:
+    """Return significant, lightly normalised words from a phrase."""
+    lowered = str(text).lower()
+    lowered = re.sub(r"\b(log|sign)s?\s+in\b", "login", lowered)
+    lowered = re.sub(r"\bsigns?\s+up\b", "signup", lowered)
+    words = re.findall(r"[a-z0-9]+", lowered)
+    return {word for word in words if len(word) > 2 and word not in _STOPWORDS}
+
+
 def _extract_test_names(generated_tests: Dict[str, Any]) -> List[str]:
     """Extract test names from generated test dict."""
     tests_list = _safe_get(generated_tests, "tests", [])
@@ -99,19 +141,22 @@ def verify(
         ).lower()
         covered = False
 
-        # Check if any test name contains key terms from the acceptance criterion
+        criterion_terms = _normalise_terms(criterion_text)
+        normalised_criterion = re.sub(r"\b(log|sign)s?\s+in\b", "login", criterion_text)
+
+        # Check if any test name shares a significant term with the criterion
         for test_name in generated_test_names:
-            test_lower = test_name.lower()
-            criterion_words = set(re.findall(r"\b\w+\b", criterion_text))
-            test_words = set(re.findall(r"\b\w+\b", test_lower))
-            if criterion_words & test_words:
+            if criterion_terms & _normalise_terms(test_name):
                 covered = True
                 break
 
         # Also check if the target function matches
         if not covered:
             for func_name in generated_test_functions:
-                if func_name.lower() in criterion_text or criterion_text in func_name.lower():
+                function = func_name.lower()
+                if function and (
+                    function in normalised_criterion or normalised_criterion in function
+                ):
                     covered = True
                     break
 
@@ -178,6 +223,8 @@ def _detect_discrepancies(prd_dict: Dict[str, Any], code_ctx: Any) -> List[Dict[
 
     # Check functional specification vs code functions
     spec = _safe_get(prd_dict, "functional_specification", "")
+    if isinstance(spec, dict):
+        spec = spec.get("specification", "")
     spec_lower = str(spec).lower() if spec else ""
     functions = _safe_get(code_ctx, "functions", []) if code_ctx else []
 
@@ -185,19 +232,22 @@ def _detect_discrepancies(prd_dict: Dict[str, Any], code_ctx: Any) -> List[Dict[
         # Handle both dict and model
         func_name = (
             func.get("name", "") if isinstance(func, dict) else getattr(func, "name", "")
-        ).lower()
+        )
         func_doc = (
             func.get("docstring", "") if isinstance(func, dict) else getattr(func, "docstring", "")
-        ).lower()
+        )
+        func_name_lower = func_name.lower()
+        func_doc_lower = (func_doc or "").lower()
+
         # If function name doesn't relate to spec, flag
-        if func_name and spec_lower and func_name not in spec_lower:
-            spec_words = set(re.findall(r"\b\w+\b", spec_lower)) if spec_lower else set()
-            doc_words = set(re.findall(r"\b\w+\b", func_doc)) if func_doc else set()
+        if func_name_lower and spec_lower and func_name_lower not in spec_lower:
+            spec_words = _normalise_terms(spec_lower)
+            doc_words = _normalise_terms(func_doc_lower)
             if not (spec_words & doc_words):
                 discrepancies.append(
                     {
                         "type": "function_purpose_mismatch",
-                        "function": func.name if isinstance(func, dict) else getattr(func, "name", ""),
+                        "function": func_name,
                         "description": "Function may not align with PRD",
                         "severity": "medium",
                     }

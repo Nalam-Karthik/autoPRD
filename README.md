@@ -1,13 +1,15 @@
-# PRD-to-Code Test Generation Pipeline
+# autoPRD — PRD-to-Code Test Generation Pipeline
 
 ## Overview
 
-This project implements a complete pipeline for generating code-level functional tests from Product Requirement Documents (PRDs). The system:
+`autoPRD` is a local studio and API for turning Product Requirement Documents (PRDs) into code-level functional tests. The system:
 
 1. **Parses PRDs** (PDF or Markdown) to extract structured requirements
 2. **Analyzes Python code** using AST parsing to extract structural context
 3. **Generates test prompts** combining PRD requirements with code context
-4. **Validates code compliance** using LLM-as-a-Judge analysis
+4. **Validates generated tests** against acceptance criteria and reports coverage gaps
+
+The included web UI supports drag-and-drop upload or choosing files from your computer.
 
 ## Architecture
 
@@ -38,34 +40,61 @@ flowchart TD
 ## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-org/prd-to-code-pipeline.git
-cd prd-to-code-pipeline
+# From the repository root
+python -m venv .venv
+source .venv/bin/activate
 
-# Install dependencies
+# Install dependencies and the package
 pip install -r requirements.txt
-
-# Install the package
 pip install -e .
 ```
 
 ### Requirements
 
-- Python 3.14+
+- Python 3.10+
 - FastAPI & Uvicorn
-- Pydantic
-- PyPDF2 (for PDF parsing) or pdfplumber
-- markdown (for Markdown parsing)
+- Pydantic v2
+- pdfplumber (for PDF parsing)
+- jsonschema
+- openai (optional, only for LLM extraction)
 
 ### Requirements File
 
 ```text
-fastapi>=0.100.0
-uvicorn>=0.27.0
-pydantic>=2.5.0
-pdfplumber>=0.4.0
-pyyaml>=6.0.1
+fastapi>=0.110,<1.0
+uvicorn>=0.27
+pydantic>=2.5
+python-multipart>=0.0.9
+pdfplumber>=0.10
+jsonschema>=4.20
+openai>=1.30
 ```
+
+### Running the app
+
+```bash
+uvicorn prd_parser.api:app --reload
+```
+
+Then open <http://localhost:8000/> to use the autoPRD upload UI. The API docs are at
+<http://localhost:8000/docs>.
+
+The UI can also be served from any static file server; CORS is enabled for local
+origins by default (`AUTOPRD_CORS_ORIGINS` can override the allowed origins).
+
+### LLM configuration (optional)
+
+`parse_prd_from_file()`, `parse_prd_from_text()`, and `POST /parse-prd` can use an
+OpenAI-compatible LLM for extraction. Configure one of:
+
+```bash
+export OPENAI_API_KEY=...        # or GEMINI_API_KEY for Gemini's compatible endpoint
+export OPENAI_BASE_URL=...       # optional custom endpoint
+export PRD_LLM_MODEL=...         # optional model override
+```
+
+Without credentials the API automatically falls back to the built-in deterministic
+parser, so uploads and the web UI always work offline.
 
 ## Quick Start
 
@@ -94,19 +123,24 @@ prompt_result = engine.generate_pytest_tests(prd, code_result.structural_context
 # 4. Send prompt to LLM to get actual test code
 # The prompt contains instructions for the LLM to generate PyTest tests
 
-# 5. Validate generated tests against PRD
-from prd_parser.ast_parser import extract_structural_context_from_result
+# 5. Validate generated tests against the PRD
 verdict = verify(prd, generated_tests_dict, code_result.structural_context)
 
 print(f"Coverage: {verdict['overall_coverage']:.1f}%")
 print(f"Passed: {verdict['passed']}")
 print(f"Missing: {len(verdict['missing_assertions'])} assertions")
-print(f"Recommendations: {val['recommendations']}")
+print(f"Recommendations: {verdict['recommendations']}")
 ```
+
+`parse_prd_from_file()` and `parse_prd_from_text()` require LLM credentials. The HTTP
+upload/parse endpoints fall back to the deterministic parser automatically.
 
 ## API Reference
 
 ### Endpoints
+
+#### `GET /`
+- **Description**: Serves the autoPRD upload UI (`index.html`).
 
 #### `GET /health`
 - **Description**: Health check endpoint
@@ -115,10 +149,37 @@ print(f"Recommendations: {val['recommendations']}")
 #### `POST /parse-prd`
 - **Description**: Parse a PRD document and extract structured requirements
 - **Request Body**:
-  - `source_format`: "pdf" or "markdown" (default: "pdf")
-  - `use_llm`: Whether to use LLM for structured extraction (default: true)
   - `prd_text`: The PRD text content (required)
-- **Response**: `ParsePRDResponse` with `requirement_id`, `functional_specification`, `acceptance_criteria`, `edge_case_assumptions`, `source_format`
+  - `source_format`: "pdf" or "markdown" (default: "markdown")
+  - `use_llm`: Try LLM extraction first, with deterministic fallback (default: true)
+- **Response**: `requirement_id`, `functional_specification`, `acceptance_criteria`, `edge_case_assumptions`, `source_format`, `extraction_method`
+
+#### `POST /upload-file`
+- **Description**: Upload one or more PDF/Markdown PRD files and parse each one.
+- **Request**: `multipart/form-data` with one or more `file` fields (`.pdf`, `.md`, `.markdown`).
+- **Response**:
+
+```json
+{
+  "processed": 1,
+  "failed": 0,
+  "results": [
+    {
+      "filename": "login.md",
+      "requirement_id": "REQ-042",
+      "functional_specification": "Users must be able to log in.",
+      "acceptance_criteria": ["Given valid credentials, then a session is created."],
+      "edge_case_assumptions": [{"assumption": "Users may be offline.", "context": "", "impact": ""}],
+      "source_format": "markdown",
+      "word_count": 42
+    }
+  ],
+  "errors": []
+}
+```
+
+Returns HTTP 400 when no file could be parsed. Partially invalid batches return 200
+with the failed filenames in `errors`.
 
 #### `POST /generate-functional-tests`
 - **Description**: Generate functional test prompts from PRD and code context
@@ -128,7 +189,7 @@ print(f"Recommendations: {val['recommendations']}")
   - `prd_acceptance_criteria`: List of acceptance criterion strings
   - `prd_edge_case_assumptions`: List of edge case assumption dicts
   - `code_source`: Python source code to analyze for structural context
-  - `language`: "python" or "javascript" (default: "python")
+  - `language`: "python", "javascript", or "typescript" (default: "python")
 - **Response**: Dict with `prompt`, `format`, `language`, and `code_context`
 
 #### `POST /validate-code`
@@ -208,9 +269,10 @@ The prompt includes:
 - Detailed comparison task instructions
 - JSON schema for strict output validation
 
-### LLM-as-a-Judge Verifier
+### Verifier
 
-The verifier evaluates generated tests against PRD requirements and outputs:
+The deterministic verifier evaluates generated tests against PRD requirements and
+outputs:
 
 - **overall_coverage**: Percentage of PRD acceptance criteria covered (0-100)
 - **passed**: Whether coverage meets the threshold (default: 80%)
@@ -219,25 +281,34 @@ The verifier evaluates generated tests against PRD requirements and outputs:
 - **test_summary**: Test count, covered criteria, total criteria, coverage percentage
 - **recommendations**: Actionable improvement suggestions
 
-## Caching
+## Tests
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
 
 The system uses file-based caching (`.cache/` directory) by default, with keys generated from request parameters. To use Redis, replace the cache functions in `prd_parser/api.py` with Redis operations.
 
 ## Project Structure
 
 ```
-prd_parser/
-├── __init__.py
-├── api.py                  # FastAPI application
-├── ast_parser.py           # AST-based code parser
-├── code_test_generator.py  # Prompt engine for test generation
-├── extractor.py            # PRD text extraction
-├── generator.py            # Test case generator
-├── main.py                 # CLI and main entry point
-├── models.py               # Data models and schemas
-├── parsers.py              # PDF/Markdown PRD parsers
-├── verifier.py             # LLM-as-a-Judge verification
-└── README.md               # This documentation
+.
+├── index.html              # autoPRD web UI (drag & drop + file picker)
+├── pyproject.toml
+├── requirements.txt
+├── tests/
+│   └── test_e2e.py         # End-to-end API/parser regression tests
+└── prd_parser/
+    ├── __init__.py         # Public library API
+    ├── api.py              # FastAPI application
+    ├── ast_parser.py       # AST-based code parser
+    ├── code_test_generator.py  # Prompt engine for test generation
+    ├── extractor.py        # LLM-based PRD extraction
+    ├── generator.py        # Test case generator
+    ├── main.py             # Library/CLI entry points
+    ├── models.py           # Data models and schemas
+    ├── parsers.py          # PDF/Markdown PRD parsers
+    └── verifier.py         # Coverage verification
 ```
 
 ## Edge Cases & Optimizations

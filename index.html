@@ -1,0 +1,973 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>autoPRD · PRD-to-Code Studio</title>
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%233b82f6'/%3E%3Ctext x='32' y='43' font-family='Helvetica,Arial,sans-serif' font-size='22' font-weight='bold' fill='white' text-anchor='middle'%3EPRD%3C/text%3E%3C/svg%3E"
+  >
+  <style>
+    :root {
+      --bg: #0b1120;
+      --fg: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-strong: #2563eb;
+      --card: #172033;
+      --card-soft: #1e293b;
+      --border: #334155;
+      --radius-lg: 22px;
+      --radius-md: 14px;
+      --shadow: 0 24px 60px -24px rgba(2, 6, 23, 0.9);
+      color-scheme: dark;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background:
+        radial-gradient(900px 520px at 50% -12%, rgba(59, 130, 246, 0.2), transparent 62%),
+        var(--bg);
+      color: var(--fg);
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Subtle viewport ring shown while a file is dragged anywhere over the page */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 12px;
+      border: 2px dashed rgba(96, 165, 250, 0.6);
+      border-radius: 24px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      z-index: 10;
+    }
+
+    body.is-dragging::after {
+      opacity: 1;
+    }
+
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem 4rem;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 2.75rem;
+    }
+
+    .logo {
+      position: relative;
+      width: 152px;
+      height: 152px;
+      margin: 0 auto 1.5rem;
+      border-radius: 36px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.1rem;
+      background: linear-gradient(145deg, #60a5fa 0%, #3b82f6 38%, #1d4ed8 100%);
+      box-shadow:
+        0 26px 55px -18px rgba(37, 99, 235, 0.7),
+        inset 0 1px 0 rgba(255, 255, 255, 0.35),
+        inset 0 -2px 0 rgba(2, 6, 23, 0.25);
+      isolation: isolate;
+      overflow: hidden;
+    }
+
+    .logo::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      background: radial-gradient(120% 85% at 20% 0%, rgba(255, 255, 255, 0.42), transparent 58%);
+    }
+
+    .logo::after {
+      content: '';
+      position: absolute;
+      top: -34px;
+      right: -28px;
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.14);
+      filter: blur(16px);
+    }
+
+    .logo__auto {
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: 0.34em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.82);
+      transform: translateX(0.17em);
+    }
+
+    .logo__prd {
+      font-size: 3rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      line-height: 0.95;
+      color: #fff;
+      text-shadow: 0 2px 14px rgba(15, 23, 42, 0.35);
+    }
+
+    .logo__dot {
+      position: absolute;
+      right: 22px;
+      bottom: 20px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #fff;
+      opacity: 0.7;
+      box-shadow: 0 0 12px rgba(255, 255, 255, 0.9);
+    }
+
+    .title {
+      font-size: clamp(2rem, 6vw, 2.75rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.1;
+      color: #fff;
+    }
+
+    .subtitle {
+      max-width: 34rem;
+      margin: 0.6rem auto 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    .drop-zone {
+      display: block;
+      width: 100%;
+      padding: 3rem 2rem 2.5rem;
+      text-align: center;
+      font: inherit;
+      color: inherit;
+      border: 2px dashed var(--border);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(180deg, rgba(30, 41, 59, 0.7), rgba(23, 32, 51, 0.92));
+      cursor: pointer;
+      box-shadow: var(--shadow);
+      transition:
+        border-color 0.2s ease,
+        background 0.25s ease,
+        box-shadow 0.25s ease,
+        transform 0.25s ease;
+    }
+
+    .drop-zone:hover {
+      border-color: #60a5fa;
+      background: linear-gradient(180deg, rgba(59, 130, 246, 0.1), rgba(23, 32, 51, 0.94));
+    }
+
+    .drop-zone:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    body.is-dragging .drop-zone {
+      border-color: #60a5fa;
+      border-style: solid;
+      background: linear-gradient(180deg, rgba(59, 130, 246, 0.18), rgba(30, 64, 175, 0.12));
+      box-shadow:
+        0 0 0 4px rgba(59, 130, 246, 0.15),
+        0 30px 70px -30px rgba(59, 130, 246, 0.7);
+      transform: translateY(-2px);
+    }
+
+    .drop-zone__icon {
+      display: grid;
+      place-items: center;
+      width: 68px;
+      height: 68px;
+      margin: 0 auto 1.25rem;
+      border-radius: 20px;
+      color: #93c5fd;
+      background: rgba(59, 130, 246, 0.14);
+      border: 1px solid rgba(96, 165, 250, 0.28);
+      transition: transform 0.25s ease, background 0.25s ease;
+    }
+
+    body.is-dragging .drop-zone__icon {
+      transform: translateY(-3px) scale(1.05);
+      background: rgba(59, 130, 246, 0.26);
+    }
+
+    .drop-zone__text {
+      display: block;
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--fg);
+    }
+
+    .drop-zone__hint {
+      display: block;
+      margin-top: 0.45rem;
+      font-size: 0.9rem;
+      color: var(--muted);
+    }
+
+    .drop-zone__link {
+      color: #93c5fd;
+      font-weight: 500;
+      text-decoration: underline;
+      text-decoration-style: dotted;
+      text-underline-offset: 3px;
+      cursor: pointer;
+    }
+
+    .drop-zone__btn {
+      display: inline-flex;
+      margin-top: 1.5rem;
+    }
+
+    body.is-dragging .drop-zone__btn {
+      pointer-events: none;
+    }
+
+    .drop-zone__formats {
+      display: block;
+      margin-top: 1.15rem;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #64748b;
+    }
+
+    /*
+     * Visually hidden instead of display:none. Safari and Firefox are more
+     * reliable at opening the picker from a label when the input is rendered.
+     */
+    .file-input {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      white-space: nowrap;
+      border: 0;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.55rem;
+      padding: 0.8rem 1.4rem;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      font: inherit;
+      font-size: 0.92rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition:
+        background 0.2s ease,
+        border-color 0.2s ease,
+        transform 0.2s ease,
+        box-shadow 0.2s ease;
+    }
+
+    .btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn--primary {
+      background: linear-gradient(180deg, #3b82f6, #2563eb);
+      color: #fff;
+      box-shadow:
+        0 12px 24px -12px rgba(37, 99, 235, 0.9),
+        inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    }
+
+    .btn--primary:not(:disabled):hover {
+      background: linear-gradient(180deg, #4f8ef7, #2563eb);
+      transform: translateY(-1px);
+    }
+
+    .btn--ghost {
+      background: rgba(51, 65, 85, 0.55);
+      border-color: var(--border);
+      color: #e2e8f0;
+    }
+
+    .btn--ghost:hover {
+      background: rgba(71, 85, 105, 0.85);
+      border-color: #64748b;
+    }
+
+    .file-panel {
+      margin-top: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: rgba(23, 32, 51, 0.85);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      animation: panel-in 0.2s ease;
+    }
+
+    @keyframes panel-in {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .file-panel[hidden] {
+      display: none;
+    }
+
+    .file-panel__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 0.9rem 1.1rem;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.7);
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .file-panel__count strong {
+      color: var(--fg);
+      font-weight: 600;
+    }
+
+    .link-btn {
+      padding: 0.25rem 0.45rem;
+      border: 0;
+      border-radius: 6px;
+      background: none;
+      color: #93c5fd;
+      font: inherit;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.2s ease, color 0.2s ease;
+    }
+
+    .link-btn:hover {
+      color: #bfdbfe;
+      background: rgba(59, 130, 246, 0.12);
+    }
+
+    .link-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .file-list {
+      list-style: none;
+      max-height: 280px;
+      padding: 0.4rem;
+      overflow-y: auto;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+      padding: 0.7rem 0.75rem;
+      border-radius: 10px;
+      animation: file-in 0.18s ease;
+      transition: background 0.2s ease;
+    }
+
+    @keyframes file-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .file-item + .file-item {
+      border-top: 1px solid rgba(51, 65, 85, 0.45);
+    }
+
+    .file-item:hover {
+      background: rgba(51, 65, 85, 0.35);
+    }
+
+    .file-item__badge {
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      font-size: 0.62rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      color: #bfdbfe;
+      background: rgba(59, 130, 246, 0.16);
+      border: 1px solid rgba(96, 165, 250, 0.25);
+    }
+
+    .file-item__badge--pdf {
+      color: #fecaca;
+      background: rgba(239, 68, 68, 0.14);
+      border-color: rgba(248, 113, 113, 0.3);
+    }
+
+    .file-item__meta {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .file-item__name {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 500;
+      color: var(--fg);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-item__size {
+      display: block;
+      margin-top: 0.18rem;
+      font-size: 0.75rem;
+      color: var(--muted);
+    }
+
+    .file-item__remove {
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 1.15rem;
+      line-height: 1;
+      cursor: pointer;
+      transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+    }
+
+    .file-item__remove:hover {
+      color: #fca5a5;
+      background: rgba(239, 68, 68, 0.12);
+      border-color: rgba(248, 113, 113, 0.25);
+    }
+
+    .file-item__remove:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .file-list__empty {
+      padding: 1.6rem 1rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 1.5rem;
+    }
+
+    .status {
+      margin-top: 1.25rem;
+      padding: 1rem 1.15rem;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      font-size: 0.85rem;
+      animation: status-in 0.2s ease;
+    }
+
+    @keyframes status-in {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .status[hidden] {
+      display: none;
+    }
+
+    .status strong {
+      display: block;
+      margin-bottom: 0.35rem;
+      font-size: 0.9rem;
+    }
+
+    .status pre {
+      max-height: 260px;
+      margin: 0.5rem 0 0;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.76rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      opacity: 0.9;
+    }
+
+    .status--success {
+      color: #99f6e4;
+      background: rgba(20, 184, 166, 0.12);
+      border-color: rgba(45, 212, 191, 0.4);
+    }
+
+    .status--error {
+      color: #fecaca;
+      background: rgba(248, 113, 113, 0.1);
+      border-color: rgba(248, 113, 113, 0.4);
+    }
+
+    @media (max-width: 560px) {
+      .container {
+        padding: 2.25rem 1.1rem 3rem;
+      }
+
+      .logo {
+        width: 124px;
+        height: 124px;
+        border-radius: 30px;
+      }
+
+      .logo__auto {
+        font-size: 0.82rem;
+      }
+
+      .logo__prd {
+        font-size: 2.5rem;
+      }
+
+      .drop-zone {
+        padding: 2.25rem 1.25rem 2rem;
+      }
+
+      .actions {
+        justify-content: stretch;
+      }
+
+      .actions .btn {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.001ms !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <div class="logo" role="img" aria-label="autoPRD">
+        <span class="logo__auto" aria-hidden="true">auto</span>
+        <span class="logo__prd" aria-hidden="true">PRD</span>
+        <span class="logo__dot" aria-hidden="true"></span>
+      </div>
+      <h1 class="title">autoPRD</h1>
+      <p class="subtitle">
+        PRD-to-Code Studio — upload your PRD documents and turn them into functional tests.
+      </p>
+    </header>
+
+    <div class="drop-zone" id="dropZone" aria-describedby="dropHint">
+      <span class="drop-zone__icon" aria-hidden="true">
+        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 16V4" />
+          <path d="m7 9 5-5 5 5" />
+          <path d="M20 16.5v1.7a1.8 1.8 0 0 1-1.8 1.8H5.8A1.8 1.8 0 0 1 4 18.2v-1.7" />
+        </svg>
+      </span>
+      <span class="drop-zone__text">Drag &amp; drop your PRD files here</span>
+      <span class="drop-zone__hint" id="dropHint">
+        or
+        <label class="drop-zone__link" for="fileInput">choose files from your computer</label>
+      </span>
+      <label
+        class="btn btn--ghost drop-zone__btn"
+        for="fileInput"
+        id="browseBtn"
+        role="button"
+        tabindex="0"
+      >
+        Choose files
+      </label>
+      <span class="drop-zone__formats">PDF · MD · MARKDOWN</span>
+    </div>
+
+    <input
+      type="file"
+      class="file-input"
+      id="fileInput"
+      accept=".pdf,.md,.markdown,application/pdf,text/markdown"
+      tabindex="-1"
+      multiple
+    >
+
+    <section class="file-panel" id="filePanel" aria-label="Selected files" hidden>
+      <div class="file-panel__head">
+        <span class="file-panel__count" id="fileCount">0 files selected</span>
+        <button type="button" class="link-btn" id="clearBtn">Clear all</button>
+      </div>
+      <ul class="file-list" id="fileList"></ul>
+    </section>
+
+    <div class="actions">
+      <button type="button" class="btn btn--primary" id="submitBtn" disabled>Submit PRD</button>
+    </div>
+
+    <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+  </div>
+
+  <script>
+    const dropZone = document.getElementById('dropZone');
+    const browseBtn = document.getElementById('browseBtn');
+    const fileInput = document.getElementById('fileInput');
+    const filePanel = document.getElementById('filePanel');
+    const fileCount = document.getElementById('fileCount');
+    const fileList = document.getElementById('fileList');
+    const clearBtn = document.getElementById('clearBtn');
+    const submitBtn = document.getElementById('submitBtn');
+    const statusEl = document.getElementById('status');
+
+    const ACCEPTED_EXTENSIONS = ['.pdf', '.md', '.markdown'];
+    const SUBMIT_LABEL = submitBtn.textContent;
+    const API_BASE =
+      window.location.port === '8000'
+        ? window.location.origin
+        : 'http://localhost:8000';
+
+    let selectedFiles = [];
+    let dragDepth = 0;
+
+    /* ---------------------------------------------------------------- files */
+
+    function fileKey(file) {
+      return `${file.name}::${file.size}::${file.lastModified}`;
+    }
+
+    function isAccepted(file) {
+      const name = file.name.toLowerCase();
+      return (
+        ACCEPTED_EXTENSIONS.some((extension) => name.endsWith(extension)) ||
+        file.type === 'application/pdf' ||
+        file.type === 'text/markdown'
+      );
+    }
+
+    function formatBytes(bytes) {
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function addFiles(fileListLike) {
+      const incoming = Array.from(fileListLike || []);
+      if (incoming.length === 0) return;
+
+      const existing = new Set(selectedFiles.map(fileKey));
+      const accepted = [];
+      const rejected = [];
+      const duplicates = [];
+
+      incoming.forEach((file) => {
+        if (!isAccepted(file)) {
+          rejected.push(file.name);
+          return;
+        }
+        if (existing.has(fileKey(file))) {
+          duplicates.push(file.name);
+          return;
+        }
+        existing.add(fileKey(file));
+        accepted.push(file);
+      });
+
+      selectedFiles = selectedFiles.concat(accepted);
+      renderFiles();
+
+      if (rejected.length > 0) {
+        showStatus(
+          'error',
+          'Unsupported file type',
+          `${rejected.join(', ')} — only PDF, MD and MARKDOWN files are supported.`
+        );
+        return;
+      }
+
+      if (accepted.length > 0) {
+        clearStatus();
+        return;
+      }
+
+      if (duplicates.length > 0) {
+        showStatus(
+          'error',
+          'Already added',
+          `${duplicates.join(', ')} ${duplicates.length === 1 ? 'is' : 'are'} already in the list.`
+        );
+      }
+    }
+
+    function renderFiles() {
+      fileList.textContent = '';
+
+      if (selectedFiles.length === 0) {
+        filePanel.hidden = true;
+        submitBtn.disabled = true;
+        return;
+      }
+
+      filePanel.hidden = false;
+      fileCount.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected`;
+
+      selectedFiles.forEach((file, index) => {
+        const isPdf = file.name.toLowerCase().endsWith('.pdf');
+
+        const item = document.createElement('li');
+        item.className = 'file-item';
+
+        const badge = document.createElement('span');
+        badge.className = isPdf ? 'file-item__badge file-item__badge--pdf' : 'file-item__badge';
+        badge.textContent = isPdf ? 'PDF' : 'MD';
+        badge.setAttribute('aria-hidden', 'true');
+
+        const meta = document.createElement('span');
+        meta.className = 'file-item__meta';
+
+        const name = document.createElement('span');
+        name.className = 'file-item__name';
+        name.textContent = file.name;
+        name.title = file.name;
+
+        const size = document.createElement('span');
+        size.className = 'file-item__size';
+        size.textContent = formatBytes(file.size);
+
+        meta.append(name, size);
+
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'file-item__remove';
+        remove.setAttribute('aria-label', `Remove ${file.name}`);
+        remove.title = `Remove ${file.name}`;
+        remove.textContent = '\u00d7';
+        remove.addEventListener('click', () => {
+          selectedFiles.splice(index, 1);
+          renderFiles();
+          clearStatus();
+        });
+
+        item.append(badge, meta, remove);
+        fileList.append(item);
+      });
+
+      submitBtn.disabled = false;
+    }
+
+    /* ---------------------------------------------------------------- status */
+
+    function clearStatus() {
+      statusEl.hidden = true;
+      statusEl.textContent = '';
+      statusEl.className = 'status';
+    }
+
+    function showStatus(type, title, details) {
+      statusEl.hidden = false;
+      statusEl.className = `status status--${type}`;
+      statusEl.setAttribute('role', type === 'error' ? 'alert' : 'status');
+      statusEl.textContent = '';
+
+      const heading = document.createElement('strong');
+      heading.textContent = title;
+      statusEl.append(heading);
+
+      if (details !== undefined && details !== null && details !== '') {
+        const body =
+          typeof details === 'object' ? JSON.stringify(details, null, 2) : String(details);
+        const pre = document.createElement('pre');
+        pre.textContent = body;
+        statusEl.append(pre);
+      }
+    }
+
+    /* ------------------------------------------------------- drag and drop */
+
+    function hasFiles(event) {
+      const transfer = event.dataTransfer;
+      if (!transfer) return false;
+      return Array.from(transfer.types || []).includes('Files');
+    }
+
+    function showDragState() {
+      document.body.classList.add('is-dragging');
+      dropZone.classList.add('drag-over');
+    }
+
+    function hideDragState() {
+      dragDepth = 0;
+      document.body.classList.remove('is-dragging');
+      dropZone.classList.remove('drag-over');
+    }
+
+    // Drop anywhere on the page, and stop the browser from navigating to the file.
+    window.addEventListener('dragenter', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepth += 1;
+      showDragState();
+    });
+
+    window.addEventListener('dragover', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    });
+
+    window.addEventListener('dragleave', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth === 0) hideDragState();
+    });
+
+    window.addEventListener('drop', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      hideDragState();
+      addFiles(event.dataTransfer.files);
+    });
+
+    window.addEventListener('dragend', hideDragState);
+    window.addEventListener('blur', hideDragState);
+
+    /* ------------------------------------------------------------- picker */
+
+    function openFilePicker() {
+      // showPicker() is the modern API and is more reliable in some browsers.
+      if (typeof fileInput.showPicker === 'function') {
+        try {
+          fileInput.showPicker();
+          return;
+        } catch (error) {
+          // Fall through to click() when the picker is blocked/unavailable.
+        }
+      }
+      fileInput.click();
+    }
+
+    dropZone.addEventListener('click', (event) => {
+      // <label for="fileInput"> elements open the picker natively.
+      if (event.target.closest('label')) return;
+      openFilePicker();
+    });
+
+    // Labels are not keyboard-activatable by default; make the main one behave
+    // like a button for Enter and Space.
+    browseBtn.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openFilePicker();
+      }
+    });
+
+    fileInput.addEventListener('change', (event) => {
+      addFiles(event.target.files);
+      // Allow picking the same file again later.
+      fileInput.value = '';
+    });
+
+    clearBtn.addEventListener('click', () => {
+      selectedFiles = [];
+      fileInput.value = '';
+      renderFiles();
+      clearStatus();
+    });
+
+    /* ------------------------------------------------------------- submit */
+
+    submitBtn.addEventListener('click', async () => {
+      if (selectedFiles.length === 0) return;
+
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Uploading\u2026';
+
+      const formData = new FormData();
+      selectedFiles.forEach((file) => {
+        formData.append('file', file);
+      });
+
+      try {
+        const response = await fetch(`${API_BASE}/upload-file`, {
+          method: 'POST',
+          body: formData,
+        });
+
+        let result = null;
+        try {
+          result = await response.json();
+        } catch {
+          result = null;
+        }
+
+        const processed =
+          result && typeof result.processed === 'number'
+            ? result.processed
+            : selectedFiles.length;
+        const failed = result && typeof result.failed === 'number' ? result.failed : 0;
+
+        if (response.ok) {
+          const noun = processed === 1 ? 'file' : 'files';
+          showStatus(
+            failed > 0 ? 'error' : 'success',
+            failed > 0
+              ? `Parsed ${processed} ${noun}, but ${failed} failed`
+              : `Parsed ${processed} ${noun} successfully`,
+            result
+          );
+        } else {
+          const detail =
+            result && Array.isArray(result.errors) && result.errors.length > 0
+              ? result.errors.map((item) => `${item.filename}: ${item.error}`).join('\n')
+              : result;
+          showStatus('error', 'Error parsing PRD', detail || `HTTP ${response.status}`);
+        }
+      } catch (error) {
+        showStatus('error', 'Request failed', error.message);
+      } finally {
+        submitBtn.textContent = SUBMIT_LABEL;
+        submitBtn.disabled = selectedFiles.length === 0;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -6,9 +6,13 @@ text. Output is validated against PRD_EXTRACTION_SCHEMA.
 
 import json
 import logging
+import os
+import re
 from typing import Optional
 
 from prd_parser.models import PRDExtraction, PRD_EXTRACTION_SCHEMA
+
+GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +35,7 @@ Return STRICT JSON ONLY (no prose, no markdown formatting, no code blocks). The 
 1. requirement_id:
    - Extract the requirement ID if present (format: REQ-NNN where NNN is 3+ digits).
    - If multiple IDs are found, pick the first one that appears.
-   - If no ID is found, use "UNKNOWN-REQ".
+   - If no ID is found, use "REQ-001" as the documented fallback.
    - Do NOT generate a new ID — only extract existing ones.
 
 2. functional_specification:
@@ -82,6 +86,16 @@ Remember: Output JSON ONLY. No surrounding text, no markdown, no explanations.
 """
 
 
+def _resolve_model_name(default: str) -> str:
+    """Pick the model name, adapting the default to the available provider."""
+    configured = os.getenv("PRD_LLM_MODEL")
+    if configured:
+        return configured
+    if not os.getenv("OPENAI_API_KEY") and os.getenv("GEMINI_API_KEY"):
+        return "gemini-2.5-flash"
+    return default
+
+
 class Extractor:
     """Extracts structured requirement data from parsed PRD text using an LLM."""
 
@@ -94,21 +108,51 @@ class Extractor:
             model_name: Name of the LLM model to use.
         """
         self.llm_client = llm_client
-        self.model_name = model_name
+        self.model_name = _resolve_model_name(model_name)
+
+    def _create_default_client(self):
+        """Create an OpenAI-compatible client from environment variables.
+
+        Supports OpenAI directly and Google Gemini's OpenAI-compatible
+        endpoint. Explicitly passed clients always take precedence.
+        """
+        openai_key = os.getenv("OPENAI_API_KEY")
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
+        if openai_key:
+            api_key = openai_key
+            base_url = os.getenv("OPENAI_BASE_URL")
+        elif gemini_key:
+            api_key = gemini_key
+            base_url = os.getenv("GEMINI_BASE_URL", GEMINI_OPENAI_BASE_URL)
+        else:
+            raise RuntimeError(
+                "LLM client not configured. Pass an OpenAI-compatible client "
+                "or set OPENAI_API_KEY / GEMINI_API_KEY."
+            )
+
+        try:
+            from openai import OpenAI
+        except ImportError as exc:  # pragma: no cover - dependency is declared
+            raise RuntimeError(
+                "The 'openai' package is required for LLM extraction."
+            ) from exc
+
+        if base_url:
+            self.llm_client = OpenAI(api_key=api_key, base_url=base_url)
+        else:
+            self.llm_client = OpenAI(api_key=api_key)
+        return self.llm_client
 
     def _call_llm(self, prompt: str) -> str:
-        """Call the LLM and return the raw response text.
-
-        Subclasses or concrete implementations should override this method
-        with actual LLM API calls.
-        """
-        if self.llm_client is None:
-            raise NotImplementedError(
-                "LLM client not configured. Pass an OpenAI-compatible client "
-                "instance when initializing Extractor."
-            )
-        # Default implementation - should be overridden
-        raise NotImplementedError("Subclasses must implement _call_llm")
+        """Call the configured LLM and return the raw response text."""
+        client = self.llm_client or self._create_default_client()
+        response = client.chat.completions.create(
+            model=self.model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        return response.choices[0].message.content or ""
 
     def extract(self, prd_text: str, source_format: str = "pdf") -> PRDExtraction:
         """Extract structured data from PRD text.
@@ -124,6 +168,10 @@ class Extractor:
         # Safely insert prd_text into the prompt.
         # using str.replace() to avoid Python .format() clashing
         formatted_prompt = EXTRACTION_PROMPT.replace("{prd_text}", prd_text)
+        formatted_prompt = formatted_prompt.replace(
+            "<JSON_SCHEMA_PLACEHOLDER>",
+            json.dumps(PRD_EXTRACTION_SCHEMA, indent=2),
+        )
         # Call the LLM
         raw_response = self._call_llm(formatted_prompt)
 
@@ -159,17 +207,23 @@ class Extractor:
 
         Removes markdown fences, triple-backticks, and any surrounding prose.
         """
-        # Remove triple-backtick code blocks (with or without language specifier)
-        cleaned = re.sub(r"^```[\w]*\n", "", text, flags=re.MULTILINE)
-        cleaned = re.sub(r"\n```$", "", cleaned, flags=re.MULTILINE)
-        # Remove triple-backtick code blocks (no language)
-        cleaned = re.sub(r"^```\n", "", cleaned, flags=re.MULTILINE)
-        cleaned = re.sub(r"\n```$", "", cleaned, flags=re.MULTILINE)
-        # Strip leading/trailing whitespace and prose markers
-        cleaned = cleaned.strip()
-        # Remove any trailing comma before final brace if present
-        cleaned = cleaned.rstrip(",")
-        return cleaned
+        cleaned = text.strip()
+
+        # Prefer the contents of the first fenced block, if present.
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned, re.IGNORECASE)
+        if fenced:
+            cleaned = fenced.group(1).strip()
+
+        # Otherwise, keep only the outermost JSON object and drop prose.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end > start:
+            cleaned = cleaned[start : end + 1]
+
+        # Tolerate trailing commas before closing braces/brackets.
+        cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
+
+        return cleaned.strip()
 
     def validate_json_schema(self, json_data: dict) -> bool:
         """Validate raw dict against the standalone JSON Schema.

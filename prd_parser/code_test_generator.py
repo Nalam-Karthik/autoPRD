@@ -56,7 +56,7 @@ class CodeTestPromptEngine:
     def build_comparison_prompt(
         self,
         prd_extraction: PRDExtraction,
-        code_context: structural_context_contextAST,
+        code_context: structural_context_context,
         language: str = "python",
     ) -> str:
         """Build a prompt that compares implementation against specifications.
@@ -80,11 +80,11 @@ class CodeTestPromptEngine:
 
         prompt += "\n\nGiven a Product Requirement Document (PRD) and the corresponding implementation, your task is to generate tests that verify the code logic fulfills the PRD specifications."
 
-        prompt += "\n\n--- PRD REQUIREMENTS START ---"
+        prompt += "\n\n--- PRD REQUIREMENTS START ---\n"
         prompt += prd_section
         prompt += "\n--- PRD REQUIREMENTS END ---"
 
-        prompt += "\n--- IMPLEMENTATION CODE CONTEXT START ---"
+        prompt += "\n--- IMPLEMENTATION CODE CONTEXT START ---\n"
         prompt += code_section
         prompt += "\n--- IMPLEMENTATION CODE CONTEXT END ---"
 
@@ -150,8 +150,6 @@ class CodeTestPromptEngine:
 
         return prompt
 
-        return prompt
-
     def _format_prd_section(self, prd: PRDExtraction) -> str:
         """Format the PRD extraction into a readable section."""
         lines = []
@@ -186,7 +184,7 @@ class CodeTestPromptEngine:
         return "\n".join(lines)
 
     def _format_code_section(
-        self, code_ctx: structural_context_contextAST, language: str
+        self, code_ctx: structural_context_context, language: str
     ) -> str:
         """Format the code structural context into a readable section."""
         lines = []
@@ -211,11 +209,11 @@ class CodeTestPromptEngine:
         for cls in code_ctx.classes:
             methods_info = []
             for m in cls.methods:
-                args_str = ", ".join(m.args) if m.args else "()"
+                args_str = ", ".join(m.args)
                 returns_str = m.returns if m.returns else "void"
                 doc = m.docstring if m.docstring else ""
                 methods_info.append(
-                    f"    - {m.name}{args_str} -> {returns_str}: {doc[:50] if doc else ''}"
+                    f"    - {m.name}({args_str}) -> {returns_str}: {doc[:50] if doc else ''}"
                 )
             doc = cls.docstring if cls.docstring else ""
             lines.append(
@@ -228,11 +226,11 @@ class CodeTestPromptEngine:
         # Functions (top-level)
         lines.append("Top-Level Functions:")
         for func in code_ctx.functions:
-            args_str = ", ".join(func.args) if func.args else "()"
+            args_str = ", ".join(func.args)
             returns_str = func.returns if func.returns else "None"
             doc = func.docstring if func.docstring else ""
             lines.append(
-                f"  {func.name}{args_str} -> {returns_str}: {doc[:50] if doc else ''} (line {func.line})"
+                f"  {func.name}({args_str}) -> {returns_str}: {doc[:50] if doc else ''} (line {func.line})"
             )
         lines.append("")
 
@@ -260,9 +258,17 @@ class CodeTestPromptEngine:
             if doc:
                 lines.append(f"  {func.name}: {doc[:80]}")
 
+        # For languages without a structural parser (JS/TS), include source so
+        # the model still receives implementable context.
+        if code_ctx.raw_source and not code_ctx.functions and not code_ctx.classes:
+            lines.append("")
+            lines.append("Source Code:")
+            for source_line in code_ctx.raw_source.splitlines()[:250]:
+                lines.append(f"  {source_line}")
+
         return "\n".join(lines)
 
-    def generate_pytest_tests(self, prd: PRDExtraction, code_ctx: structural_context_contextAST) -> Dict[str, Any]:
+    def generate_pytest_tests(self, prd: PRDExtraction, code_ctx: structural_context_context) -> Dict[str, Any]:
         """Generate PyTest test cases from PRD and code context.
 
         Args:
@@ -275,7 +281,7 @@ class CodeTestPromptEngine:
         prompt = self.build_comparison_prompt(prd, code_ctx, language="python")
         return {"prompt": prompt, "format": "pytest", "language": "python"}
 
-    def generate_jest_tests(self, prd: PRDExtraction, code_ctx: structural_context_contextAST) -> Dict[str, Any]:
+    def generate_jest_tests(self, prd: PRDExtraction, code_ctx: structural_context_context) -> Dict[str, Any]:
         """Generate Jest test cases from PRD and code context.
 
         Args:
@@ -289,7 +295,7 @@ class CodeTestPromptEngine:
         return {"prompt": prompt, "format": "jest", "language": "javascript"}
 
     def generate_all_tests(
-        self, prd: PRDExtraction, code_ctx: structural_context_contextAST
+        self, prd: PRDExtraction, code_ctx: structural_context_context
     ) -> Dict[str, Any]:
         """Generate test cases in both PyTest and Jest formats.
 
@@ -308,14 +314,14 @@ class CodeTestPromptEngine:
 
 def extract_structural_context_from_result(
     result: ASTExtractionResult,
-) -> structural_context_contextAST:
+) -> structural_context_context:
     """Extract the structural context from an ASTExtractionResult.
 
     Args:
         result: The ASTExtractionResult from parsing Python source.
 
     Returns:
-        The structural_context_contextAST.
+        The structural_context_context.
     """
     if not result.success:
         raise ValueError(f"Failed to parse source: {result.error_message}")

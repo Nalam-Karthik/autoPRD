@@ -4,9 +4,10 @@ Handles ingestion of PRD documents in PDF and Markdown formats,
 extracting raw text suitable for LLM-based feature/requirement extraction.
 """
 
+import io
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import pdfplumber
@@ -99,27 +100,39 @@ class PDFPRDParser:
         if not file_path.exists():
             raise FileNotFoundError(f"PDF file not found: {file_path}")
 
-        full_text = []
+        return self.parse_bytes(file_path.read_bytes(), filename=file_path.name)
+
+    def parse_bytes(
+        self, content: bytes, filename: str = "uploaded.pdf"
+    ) -> PRDParseResult:
+        """Parse an in-memory PDF (e.g. an API upload).
+
+        Args:
+            content: Raw PDF bytes.
+            filename: Original filename, used for metadata only.
+
+        Returns:
+            PRDParseResult containing the extracted text and metadata.
+        """
+        full_text: List[str] = []
         page_count = 0
 
-        with pdfplumber.open(file_path) as pdf:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
             page_count = len(pdf.pages)
             for page in pdf.pages:
                 text = page.extract_text()
                 if text:
                     full_text.append(text)
 
-        combined_text = "\n".join(full_text)
-        metadata = {
-            "total_pages": page_count,
-            "file_size": file_path.stat().st_size if file_path.exists() else 0,
-        }
-
         return PRDParseResult(
-            text=combined_text,
+            text="\n".join(full_text),
             source_format="pdf",
             pages=page_count,
-            metadata=metadata,
+            metadata={
+                "filename": filename,
+                "total_pages": page_count,
+                "file_size": len(content),
+            },
         )
 
 
@@ -139,30 +152,52 @@ class MarkdownPRDParser:
         if not file_path.exists():
             raise FileNotFoundError(f"Markdown file not found: {file_path}")
 
-        # Read the file content
-        text = file_path.read_text(encoding="utf-8")
+        result = self.parse_bytes(file_path.read_bytes(), filename=file_path.name)
+        result.metadata["file_size"] = file_path.stat().st_size
+        return result
 
-        # Basic Markdown cleanup - remove code blocks for cleaner LLM input
-        # Remove fenced code blocks (``` ... ```)
+    def parse_bytes(
+        self, content: bytes, filename: str = "uploaded.md"
+    ) -> PRDParseResult:
+        """Parse an in-memory Markdown document (e.g. an API upload)."""
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("utf-8", errors="replace")
+        return self.parse_text(text, filename=filename, file_size=len(content))
+
+    def parse_text(
+        self, text: str, *, filename: str = "", file_size: int = 0
+    ) -> PRDParseResult:
+        """Parse Markdown text while preserving line and section structure."""
+        # Remove fenced code blocks (``` ... ```) for cleaner LLM input
         text = re.sub(r"```[\s\S]*?```", "", text)
-        # Remove inline code (`code`)
+        # Remove inline code backticks but keep the content
         text = re.sub(r"`([^`]+)`", r"\1", text)
         # Remove HTML tags
-        text = re.sub(r"<.*?>", " ", text)
-        # Collapse multiple whitespaces
-        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"<[^>]+>", " ", text)
 
-        # Try to count headings as rough page estimate
-        heading_count = len(re.findall(r"^#{1,6}\s", text, re.MULTILINE))
+        # Normalise horizontal whitespace only. Newlines are meaningful:
+        # acceptance criteria and edge-case sections are line based.
+        cleaned_lines = []
+        for line in text.splitlines():
+            line = line.replace("\t", " ").rstrip()
+            line = re.sub(r"[ ]{2,}", " ", line)
+            cleaned_lines.append(line)
 
-        metadata = {
-            "heading_count": heading_count,
-            "file_size": file_path.stat().st_size if file_path.exists() else 0,
-        }
+        cleaned = "\n".join(cleaned_lines)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+        # Count headings as a rough page estimate
+        heading_count = len(re.findall(r"^#{1,6}\s", cleaned, re.MULTILINE))
 
         return PRDParseResult(
-            text=text,
+            text=cleaned,
             source_format="markdown",
             pages=heading_count,  # rough estimate
-            metadata=metadata,
+            metadata={
+                "filename": filename,
+                "heading_count": heading_count,
+                "file_size": file_size,
+            },
         )

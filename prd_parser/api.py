@@ -1,40 +1,51 @@
 """FastAPI application for the PRD-to-Code test generation pipeline.
 
 Exposes endpoints:
-- POST /parse-prd: Parse PRD documents (PDF or Markdown)
-- POST /generate-functional-tests: Generate functional tests from PRD and code context
-- POST /validate-code: Validate code tests against PRD acceptance criteria
-- GET /health: Health check
+- GET  /: Serve the autoPRD upload UI
+- POST /parse-prd: Parse PRD text (Markdown or extracted PDF text)
+- POST /upload-file: Upload one or more PRD files (PDF/Markdown)
+- POST /generate-functional-tests: Generate functional test prompts
+- POST /validate-code: Validate generated tests against PRD acceptance criteria
+- GET  /health: Health check
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, Body
-from fastapi.responses import JSONResponse
-from fastapi.testclient import TestClient
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
-from prd_parser.ast_parser import extract_structural_context
-from prd_parser.code_test_generator import CodeTestPromptEngine, extract_structural_context_from_result
+from prd_parser.ast_parser import extract_structural_context, structural_context_context
+from prd_parser.code_test_generator import CodeTestPromptEngine
+from prd_parser.extractor import Extractor
+from prd_parser.models import (
+    AcceptanceCriterion,
+    EdgeCaseAssumption,
+    FunctionalSpecification,
+    PRDExtraction,
+)
+from prd_parser.parsers import MarkdownPRDParser, PDFPRDParser
 from prd_parser.verifier import verify
-from prd_parser.models import PRDExtraction, FunctionalSpecification, AcceptanceCriterion, EdgeCaseAssumption
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logger = logging.getLogger("prd-api")
 logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-)
-logger.addHandler(handler)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
+    logger.addHandler(handler)
 
 # ---------------------------------------------------------------------------
 # Caching (file-based; Redis-ready design)
@@ -74,18 +85,28 @@ def _write_cache(key: str, data: Dict[str, Any]) -> None:
 
 class ParsePRDRequest(BaseModel):
     """Request body for /parse-prd."""
+
+    prd_text: str = Field(
+        ...,
+        description="Raw PRD text (Markdown, or text extracted from a PDF).",
+        min_length=1,
+    )
     source_format: str = Field(
-        default="pdf",
+        default="markdown",
         description="Input format: 'pdf' or 'markdown'.",
     )
     use_llm: bool = Field(
         default=True,
-        description="Whether to use LLM for structured extraction.",
+        description=(
+            "Try LLM-based extraction first. Falls back to the built-in "
+            "deterministic parser when no LLM credentials are configured."
+        ),
     )
 
 
 class GenerateTestsRequest(BaseModel):
     """Request body for /generate-functional-tests."""
+
     prd_requirement_id: str = Field(..., description="PRD requirement ID")
     prd_functional_spec: str = Field(..., description="Functional specification text")
     prd_acceptance_criteria: List[str] = Field(
@@ -96,12 +117,16 @@ class GenerateTestsRequest(BaseModel):
         default_factory=list,
         description="List of edge case assumption dicts",
     )
-    code_source: str = Field(..., description="Python source code to analyze")
-    language: str = Field(default="python", description="Programming language: python or javascript")
+    code_source: str = Field(..., description="Source code to analyze")
+    language: str = Field(
+        default="python",
+        description="Programming language: python or javascript/typescript",
+    )
 
 
 class ValidateCodeRequest(BaseModel):
     """Request body for /validate-code."""
+
     prd_requirement_id: str = Field(..., description="PRD requirement ID")
     prd_functional_spec: str = Field(..., description="Functional specification text")
     prd_acceptance_criteria: List[str] = Field(
@@ -118,129 +143,273 @@ class ValidateCodeRequest(BaseModel):
     )
     code_structural_context: Dict[str, Any] = Field(
         ...,
-        description="Structural context from code parsing (imports, functions, classes, logic blocks)",
+        description=(
+            "Structural context from code parsing "
+            "(imports, functions, classes, logic blocks)"
+        ),
     )
 
 
 # ---------------------------------------------------------------------------
 # FastAPI App
 # ---------------------------------------------------------------------------
-
 app = FastAPI(
     title="PRD-to-Code Test Generation Pipeline",
     version="0.1.0",
     description=(
-        "API for parsing PRDs, generating code-level functional tests (PyTest/Jest), "
-        "and validating code compliance against PRD requirements."
+        "API for parsing PRDs, generating code-level functional tests "
+        "(PyTest/Jest), and validating code compliance against PRD requirements."
     ),
 )
 
+# The UI may be served from the API itself, a local static server, or file://.
+_cors_origins = [
+    origin.strip()
+    for origin in os.getenv("AUTOPRD_CORS_ORIGINS", "*").split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+INDEX_HTML = Path(__file__).resolve().parent.parent / "index.html"
+
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# PRD text extraction helpers
 # ---------------------------------------------------------------------------
 
-def _parse_prd_text(prd_text: str, source_format: str = "pdf") -> Dict[str, Any]:
-    """Parse PRD text into structured dict.
+def _clean_markdown_line(line: str) -> str:
+    """Remove common Markdown decoration from a single line."""
+    line = re.sub(r"^#{1,6}\s*", "", line)
+    line = re.sub(r"^(?:[-*+]|\d+[.)])\s+", "", line)
+    line = line.replace("**", "").replace("__", "")
+    return line.strip()
 
-    Very simplified extraction - in production would use LLM or dedicated parsers.
-    """
-    # Try to find requirement ID pattern
-    requirement_id = "REQ-001"  # default
-    match = re.search(r"[Rr]eq[-_]?(\d{3,})", prd_text)
-    if match:
-        candidate = f"REQ-{match.group(1)}"
-        # Validate format: must match REQ-NNN pattern
-        if re.match(r"^REQ-\d{3,}$", candidate):
-            requirement_id = candidate
 
-    # Extract functional spec (first sentence-ish line)
-    spec = ""
-    sentences = [s.strip() for s in prd_text.split(". ") if s.strip()]
-    if sentences:
-        spec = sentences[0][:100]
+def _extract_functional_spec(text: str) -> str:
+    """Extract the primary functional specification from PRD text."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
-    # Extract acceptance criteria (numbered lines starting with Given/When/Then)
-    acceptance_criteria: List[str] = []
-    for line in prd_text.split("\n"):
-        line_stripped = line.strip()
-        # Match numbered criteria like '1. Given ...' - capture just the number+period, get remainder
-        m = re.match(r"^\d+\.", line_stripped)
-        if m:
-            # Get the remainder after the number+period (skip the space too)
-            remainder = line_stripped[m.end() :].lstrip()
-            if remainder.startswith(("Given ", "When ", "Then ")):
-                acceptance_criteria.append(line_stripped)
+    # Prefer an explicit "Functional Specification" section.
+    for index, line in enumerate(lines):
+        if re.match(
+            r"^#{0,6}\s*functional\s+specification\b",
+            line.strip(),
+            re.IGNORECASE,
+        ):
+            for following in lines[index + 1 :]:
+                candidate = _clean_markdown_line(following)
+                if candidate and not following.strip().startswith("#"):
+                    return candidate[:200]
 
-    # Extract edge case assumptions (lines after "### Edge Case Assumptions" heading)
-    edge_case_assumptions: List[Dict[str, str]] = []
+    # Otherwise use the first meaningful line that is not a heading,
+    # requirement ID, or acceptance criterion.
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        requirement_line = re.match(
+            r"^REQ[-_ ]?\d{3,}\b\s*[:\-\u2013]?\s*(.*)$",
+            stripped,
+            re.IGNORECASE,
+        )
+        if requirement_line:
+            remainder = requirement_line.group(1).strip()
+            if remainder:
+                return _clean_markdown_line(remainder)[:200]
+            continue
+
+        if re.match(r"^(?:[-*+]|\d+[.)])\s+", stripped):
+            continue
+
+        return _clean_markdown_line(stripped)[:200]
+
+    return ""
+
+
+def _extract_acceptance_criteria(text: str) -> List[str]:
+    """Extract numbered/bulleted acceptance criteria, preserving line structure."""
+    criteria: List[str] = []
+    seen: set[str] = set()
+    in_acceptance_section = False
+
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+
+        heading = re.match(r"^#{1,6}\s+(.*)$", stripped)
+        if heading:
+            title = heading.group(1).lower()
+            if "acceptance" in title and ("criteria" in title or "criterion" in title):
+                in_acceptance_section = True
+            elif in_acceptance_section:
+                in_acceptance_section = False
+            continue
+
+        item = re.match(r"^(?:\d+[.)]|[-*+])\s+(.*)$", stripped)
+        if not item:
+            continue
+
+        content = _clean_markdown_line(item.group(1))
+        if not content:
+            continue
+
+        starts_with_bdd_keyword = content.startswith(("Given ", "When ", "Then "))
+        if (in_acceptance_section or starts_with_bdd_keyword) and content not in seen:
+            criteria.append(content)
+            seen.add(content)
+
+    return criteria
+
+
+def _extract_edge_case_assumptions(text: str) -> List[Dict[str, str]]:
+    """Extract edge-case assumptions from a dedicated PRD section."""
+    assumptions: List[Dict[str, str]] = []
+    seen: set[str] = set()
     in_edge_section = False
-    for line in prd_text.split("\n"):
-        line_stripped = line.strip()
-        # Detect the start of the edge case section
-        if re.match(r"^###+\s*Edge Case", line_stripped, re.IGNORECASE):
-            in_edge_section = True
+
+    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+
+        heading = re.match(r"^#{1,6}\s+(.*)$", stripped)
+        if heading:
+            title = heading.group(1)
+            if re.search(r"edge[\s_-]*case|assumption", title, re.IGNORECASE):
+                in_edge_section = True
+            elif in_edge_section:
+                in_edge_section = False
             continue
-        # If we're in the edge section and hit another heading, stop
-        if in_edge_section and re.match(r"^###", line_stripped):
-            in_edge_section = False
+
+        if not in_edge_section or not stripped:
             continue
-        # Collect assumption lines within the edge section
-        if in_edge_section and line_stripped:
-            # Skip heading lines within the section
-            if not re.match(r"^###", line_stripped) and not re.match(r"^\d+\.", line_stripped):
-                # Check if it looks like an assumption
-                if ("assumption" in line_stripped.lower() or "concurrent" in line_stripped.lower() or "missing" in line_stripped.lower()):
-                    edge_case_assumptions.append(
-                        {
-                            "assumption": line_stripped,
-                            "context": "",
-                            "impact": "",
-                        }
-                    )
+
+        content = _clean_markdown_line(stripped)
+        if content and content not in seen:
+            assumptions.append(
+                {"assumption": content, "context": "", "impact": ""}
+            )
+            seen.add(content)
+
+    return assumptions
+
+
+def _parse_prd_text(prd_text: str, source_format: str = "markdown") -> Dict[str, Any]:
+    """Deterministically parse PRD text into a structured dict."""
+    text = prd_text or ""
+
+    requirement_id = "REQ-001"
+    match = re.search(r"\bREQ[-_ ]?(\d{3,})\b", text, re.IGNORECASE)
+    if match:
+        requirement_id = f"REQ-{match.group(1)}"
 
     return {
         "requirement_id": requirement_id,
-        "functional_specification": spec,
-        "acceptance_criteria": acceptance_criteria,
-        "edge_case_assumptions": edge_case_assumptions,
+        "functional_specification": _extract_functional_spec(text),
+        "acceptance_criteria": _extract_acceptance_criteria(text),
+        "edge_case_assumptions": _extract_edge_case_assumptions(text),
+        "source_format": source_format,
     }
 
 
-def _generate_tests(prd_dict: Dict[str, Any], code_source: str, language: str = "python") -> Dict[str, Any]:
-    """Generate functional tests from PRD + code context."""
-    # Parse code context using AST
-    code_result = extract_structural_context(code_source, "temp.py")
-    code_ctx = code_result.structural_context
+def _extraction_to_dict(extraction: PRDExtraction) -> Dict[str, Any]:
+    """Convert a PRDExtraction model into the API response shape."""
+    return {
+        "requirement_id": extraction.requirement_id,
+        "functional_specification": extraction.functional_specification.specification,
+        "acceptance_criteria": [
+            criterion.criterion for criterion in extraction.acceptance_criteria
+        ],
+        "edge_case_assumptions": [
+            {
+                "assumption": assumption.assumption,
+                "context": assumption.context or "",
+                "impact": assumption.impact or "",
+            }
+            for assumption in extraction.edge_case_assumptions
+        ],
+        "source_format": extraction.source_format,
+    }
 
-    # Build PRD extraction-like object for the prompt engine
-    from prd_parser.models import PRDExtraction, FunctionalSpecification, AcceptanceCriterion
 
-    # Ensure specification is not empty
-    spec = prd_dict.get("functional_specification", "") or "User functionality"
+def _parse_prd_with_fallback(
+    prd_text: str, source_format: str, use_llm: bool
+) -> tuple[Dict[str, Any], str]:
+    """Parse with the LLM when available, otherwise use the heuristic parser."""
+    if use_llm and prd_text.strip():
+        try:
+            extraction = Extractor().extract(prd_text, source_format)
+            return _extraction_to_dict(extraction), "llm"
+        except Exception as exc:
+            logger.warning(
+                "LLM extraction unavailable; using deterministic parser: %s", exc
+            )
+
+    return _parse_prd_text(prd_text, source_format), "heuristic"
+
+
+# ---------------------------------------------------------------------------
+# Code/test helpers
+# ---------------------------------------------------------------------------
+
+def _generate_tests(
+    prd_dict: Dict[str, Any], code_source: str, language: str = "python"
+) -> Dict[str, Any]:
+    """Generate functional test prompts from PRD data and code context."""
+    normalised_language = language.strip().lower()
+    if normalised_language in ("javascript", "js", "typescript", "ts"):
+        prompt_language = "javascript"
+        filename = "implementation.js"
+    elif normalised_language == "python":
+        prompt_language = "python"
+        filename = "implementation.py"
+    else:
+        raise ValueError(
+            f"Unsupported language: {language!r}. Use 'python' or 'javascript'."
+        )
+
+    if prompt_language == "python":
+        code_result = extract_structural_context(code_source, filename)
+        if not code_result.success:
+            raise ValueError(code_result.error_message or "Could not parse code.")
+        code_ctx = code_result.structural_context
+    else:
+        # No JS/TS AST parser is bundled; pass the source through to the prompt.
+        code_ctx = structural_context_context(
+            filename=filename, raw_source=code_source
+        )
 
     parsed_prd = PRDExtraction(
         requirement_id=prd_dict.get("requirement_id", "REQ-001"),
         functional_specification=FunctionalSpecification(
-            specification=spec,
-            category=prd_dict.get("category", ""),
-            complexity=prd_dict.get("complexity", ""),
+            specification=prd_dict.get("functional_specification") or "User functionality",
+            category=prd_dict.get("category") or None,
+            complexity=prd_dict.get("complexity") or None,
         ),
         acceptance_criteria=[
-            AcceptanceCriterion(criterion=c) for c in prd_dict.get("acceptance_criteria", [])
+            AcceptanceCriterion(criterion=criterion)
+            for criterion in prd_dict.get("acceptance_criteria", [])
         ],
         edge_case_assumptions=[
             EdgeCaseAssumption(
-                assumption=a.get("assumption", ""), context=a.get("context", ""), impact=a.get("impact", "")
+                assumption=assumption.get("assumption", ""),
+                context=assumption.get("context") or None,
+                impact=assumption.get("impact") or None,
             )
-            for a in prd_dict.get("edge_case_assumptions", [])
+            for assumption in prd_dict.get("edge_case_assumptions", [])
+            if assumption.get("assumption")
         ],
-        source_format=prd_dict.get("source_format", "pdf"),
+        source_format=prd_dict.get("source_format", "markdown"),
     )
 
-    # Generate prompts using the prompt engine
     engine = CodeTestPromptEngine()
-    prompt_result = engine.generate_pytest_tests(parsed_prd, code_ctx)
+    if prompt_language == "python":
+        prompt_result = engine.generate_pytest_tests(parsed_prd, code_ctx)
+    else:
+        prompt_result = engine.generate_jest_tests(parsed_prd, code_ctx)
 
     return {
         "prompt": prompt_result["prompt"],
@@ -248,158 +417,187 @@ def _generate_tests(prd_dict: Dict[str, Any], code_source: str, language: str = 
         "language": prompt_result["language"],
         "code_context": {
             "filename": code_ctx.filename,
-            "functions": [f.name for f in code_ctx.functions],
-            "classes": [c.name for c in code_ctx.classes],
-            "logic_blocks": [b.block_type for b in code_ctx.logic_blocks],
+            "functions": [function.name for function in code_ctx.functions],
+            "classes": [cls.name for cls in code_ctx.classes],
+            "logic_blocks": [
+                block.block_type for block in code_ctx.logic_blocks
+            ],
         },
     }
 
 
-def _validate_code(prd_dict: Dict[str, Any], code_ctx_dict: Dict[str, Any]) -> Dict[str, Any]:
+def _validate_code(
+    prd_dict: Dict[str, Any], code_ctx_dict: Dict[str, Any]
+) -> Dict[str, Any]:
     """Validate generated tests against PRD requirements."""
-    # Convert dict to PRDExtraction for verification
-    from prd_parser.models import PRDExtraction, FunctionalSpecification, AcceptanceCriterion
-
-    # Build PRDExtraction from dict
-    prd = PRDExtraction(
+    parsed_prd = PRDExtraction(
         requirement_id=prd_dict.get("requirement_id", "REQ-001"),
         functional_specification=FunctionalSpecification(
-            specification=prd_dict.get("functional_specification", ""),
-            category=prd_dict.get("category", ""),
-            complexity=prd_dict.get("complexity", ""),
+            specification=prd_dict.get("functional_specification") or "User functionality"
         ),
         acceptance_criteria=[
-            AcceptanceCriterion(criterion=c) for c in prd_dict.get("acceptance_criteria", [])
+            AcceptanceCriterion(criterion=criterion)
+            for criterion in prd_dict.get("acceptance_criteria", [])
         ],
         edge_case_assumptions=[
             EdgeCaseAssumption(
-                assumption=a.get("assumption", ""), context=a.get("context", ""), impact=a.get("impact", "")
+                assumption=assumption.get("assumption", ""),
+                context=assumption.get("context") or None,
+                impact=assumption.get("impact") or None,
             )
-            for a in prd_dict.get("edge_case_assumptions", [])
+            for assumption in prd_dict.get("edge_case_assumptions", [])
+            if assumption.get("assumption")
         ],
-        source_format=prd_dict.get("source_format", "pdf"),
+        source_format=prd_dict.get("source_format", "markdown"),
     )
 
-    # Convert dict to have generated_tests key
-    test_data = prd_dict.copy()
-    test_data["generated_tests"] = prd_dict.get("generated_tests", {})
-
-    result = verify(prd, test_data["generated_tests"], code_ctx_dict)
-    return result
+    return verify(parsed_prd, prd_dict.get("generated_tests", {}), code_ctx_dict)
 
 
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.post(
-    "/parse-prd",
-    summary="Parse a PRD document (PDF or Markdown)",
-    description=(
-        "Accepts PRD text and extracts structured requirements including "
-        "requirement ID, functional specification, acceptance criteria, and edge case assumptions."
-    ),
-)
+@app.get("/", include_in_schema=False)
+async def serve_ui() -> FileResponse:
+    """Serve the autoPRD upload UI when it is present next to the package."""
+    if not INDEX_HTML.exists():
+        raise HTTPException(status_code=404, detail="index.html not found")
+    return FileResponse(INDEX_HTML)
+
+
+@app.post("/parse-prd", summary="Parse PRD text")
 async def parse_prd_endpoint(
     request: ParsePRDRequest = Body(...),
 ) -> Dict[str, Any]:
-    """Parse PRD document endpoint.
+    """Parse PRD text and extract structured requirements."""
+    if request.source_format not in ("pdf", "markdown"):
+        raise HTTPException(
+            status_code=400,
+            detail="source_format must be 'pdf' or 'markdown'",
+        )
 
-    - **source_format**: Input format ('pdf' or 'markdown')
-    - **use_llm**: Whether to use LLM for structured extraction
-    """
-    result = _parse_prd_text("", request.source_format)
-    # Construct ParsePRDResponse-like output
-    return {
-        "requirement_id": result["requirement_id"],
-        "functional_specification": result["functional_specification"],
-        "acceptance_criteria": result["acceptance_criteria"],
-        "edge_case_assumptions": result["edge_case_assumptions"],
-        "source_format": request.source_format,
-    }
+    result, method = _parse_prd_with_fallback(
+        request.prd_text, request.source_format, request.use_llm
+    )
+    result["extraction_method"] = method
+    return result
 
 
 @app.post(
     "/generate-functional-tests",
-    summary="Generate functional tests from PRD and code context",
-    description=(
-        "Combines PRD requirements with code structural context to generate "
-        "PyTest/Jest test prompts that verify the implementation fulfills the specifications."
-    ),
+    summary="Generate functional test prompts from PRD and code context",
 )
 async def generate_functional_tests_endpoint(
     request: GenerateTestsRequest = Body(...),
 ) -> Dict[str, Any]:
-    """Generate functional tests endpoint.
-
-    - **prd_requirement_id**: PRD requirement identifier
-    - **prd_functional_spec**: Functional specification text
-    - **prd_acceptance_criteria**: List of acceptance criterion strings
-    - **prd_edge_case_assumptions**: List of edge case assumption dicts
-    - **code_source**: Python source code to analyze for structural context
-    - **language**: Programming language ('python' or 'javascript')
-    """
-    # Build PRD dict from request
+    """Combine PRD requirements with code context to build a test prompt."""
     prd_dict = {
         "requirement_id": request.prd_requirement_id,
         "functional_specification": request.prd_functional_spec,
         "acceptance_criteria": request.prd_acceptance_criteria,
         "edge_case_assumptions": request.prd_edge_case_assumptions,
-        "source_format": "pdf",
+        "source_format": "markdown",
     }
 
-    # Generate tests
-    result = _generate_tests(prd_dict, request.code_source, request.language)
-    return result
+    try:
+        return _generate_tests(prd_dict, request.code_source, request.language)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post(
     "/validate-code",
-    summary="Validate code tests against PRD requirements",
-    description=(
-        "Cross-evaluates generated code tests against PRD acceptance criteria, "
-        "outputting a coverage score, missing assertions, discrepancies, and recommendations."
-    ),
+    summary="Validate generated tests against PRD requirements",
 )
 async def validate_code_endpoint(
     request: ValidateCodeRequest = Body(...),
 ) -> JSONResponse:
-    """Validate code endpoint.
-
-    - **prd_requirement_id**: PRD requirement identifier
-    - **prd_functional_spec**: Functional specification text
-    - **prd_acceptance_criteria**: List of acceptance criterion strings
-    - **prd_edge_case_assumptions**: List of edge case assumption dicts
-    - **generated_tests**: Generated test cases dict (from prompt engine output)
-    - **code_structural_context**: Structural context from code parsing
-
-    Returns validation verdict with coverage score, missing assertions, discrepancies,
-    and recommendations.
-    """
-    # Build PRD dict from request
+    """Validate tests and return coverage, gaps, discrepancies, recommendations."""
     prd_dict = {
         "requirement_id": request.prd_requirement_id,
         "functional_specification": request.prd_functional_spec,
         "acceptance_criteria": request.prd_acceptance_criteria,
         "edge_case_assumptions": request.prd_edge_case_assumptions,
         "generated_tests": request.generated_tests,
-        "source_format": "pdf",
+        "source_format": "markdown",
     }
 
-    # Get code structural context
-    code_ctx_dict = request.code_structural_context
-
-    # Run validation
-    result = _validate_code(prd_dict, code_ctx_dict)
+    try:
+        result = _validate_code(prd_dict, request.code_structural_context)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return JSONResponse(content=result)
 
 
-@app.get(
-    "/health",
-    summary="Health check",
-    description="Return API status.",
-)
+@app.post("/upload-file", summary="Upload one or more PRD files (PDF or Markdown)")
+async def upload_file_endpoint(
+    file: List[UploadFile] = File(...),
+) -> JSONResponse:
+    """Parse uploaded PRD files and return structured requirements per file."""
+    results: List[Dict[str, Any]] = []
+    errors: List[Dict[str, str]] = []
+
+    for upload in file:
+        filename = upload.filename or "uploaded.prd"
+        extension = Path(filename).suffix.lower()
+        content = await upload.read()
+
+        if not content:
+            errors.append({"filename": filename, "error": "File is empty."})
+            continue
+
+        try:
+            if extension == ".pdf":
+                parsed = PDFPRDParser().parse_bytes(content, filename)
+            elif extension in (".md", ".markdown"):
+                parsed = MarkdownPRDParser().parse_bytes(content, filename)
+            else:
+                errors.append(
+                    {
+                        "filename": filename,
+                        "error": (
+                            f"Unsupported file format: {extension or '(none)'}. "
+                            "Supported formats: .pdf, .md, .markdown"
+                        ),
+                    }
+                )
+                continue
+        except Exception as exc:
+            logger.warning("Failed to parse uploaded file %s: %s", filename, exc)
+            errors.append({"filename": filename, "error": str(exc)})
+            continue
+
+        if not parsed.text.strip():
+            errors.append(
+                {
+                    "filename": filename,
+                    "error": "No extractable text found in the document.",
+                }
+            )
+            continue
+
+        parsed_fields = _parse_prd_text(parsed.text, parsed.source_format)
+        results.append(
+            {
+                **parsed_fields,
+                "filename": filename,
+                "word_count": parsed.word_count,
+            }
+        )
+
+    payload = {
+        "processed": len(results),
+        "failed": len(errors),
+        "results": results,
+        "errors": errors,
+    }
+    status_code = 200 if results else 400
+    return JSONResponse(content=payload, status_code=status_code)
+
+
+@app.get("/health", summary="Health check")
 async def health_check() -> Dict[str, str]:
     """Simple health check endpoint."""
     return {"status": "ok", "message": "PRD-to-Code API is running"}
