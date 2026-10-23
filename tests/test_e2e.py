@@ -5,10 +5,20 @@ Run with:  .venv/bin/python -m unittest discover -s tests -v
 
 from __future__ import annotations
 
+import atexit
+import os
+import shutil
+import tempfile
 import unittest
 
 from fastapi.testclient import TestClient
 
+# Keep the test run away from the developer's real database.
+_TEST_DB_DIR = tempfile.mkdtemp(prefix="autoprd-test-")
+os.environ["AUTOPRD_DB_PATH"] = os.path.join(_TEST_DB_DIR, "autoprd.db")
+atexit.register(shutil.rmtree, _TEST_DB_DIR, ignore_errors=True)
+
+from prd_parser import storage
 from prd_parser.api import app
 from prd_parser.ast_parser import extract_structural_context
 from prd_parser.extractor import Extractor
@@ -365,6 +375,102 @@ for value in range(3):
         )
         self.assertTrue(result.success)
         self.assertEqual(result.structural_context.functions[0].returns, "List[float]")
+
+
+class StorageTestCase(unittest.TestCase):
+    """The parsed document responses must be readable back from SQLite."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        storage.clear_documents()
+        cls.client = TestClient(app)
+
+    def test_upload_persists_document(self) -> None:
+        response = self.client.post(
+            "/upload-file",
+            files={"file": ("stored-login.md", SAMPLE_PRD, "text/markdown")},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["stored"], 1)
+        document_id = payload["results"][0]["document_id"]
+        self.assertIsNotNone(document_id)
+
+        listing = self.client.get("/documents").json()
+        self.assertGreaterEqual(listing["total"], 1)
+        self.assertTrue(listing["database"].endswith("autoprd.db"))
+        self.assertTrue(any(doc["id"] == document_id for doc in listing["documents"]))
+
+        detail = self.client.get(f"/documents/{document_id}")
+        self.assertEqual(detail.status_code, 200)
+        document = detail.json()
+        self.assertEqual(document["filename"], "stored-login.md")
+        self.assertEqual(document["requirement_id"], "REQ-042")
+        self.assertEqual(document["source_type"], "upload")
+        self.assertEqual(document["extraction_method"], "heuristic")
+        self.assertEqual(len(document["acceptance_criteria"]), 2)
+        self.assertEqual(len(document["edge_case_assumptions"]), 2)
+        self.assertIn("REQ-042", document["prd_text"])
+        # The stored response mirrors the live parse response.
+        self.assertEqual(document["response"]["document_id"], document_id)
+        self.assertEqual(
+            document["response"]["acceptance_criteria"],
+            document["acceptance_criteria"],
+        )
+
+    def test_parse_prd_text_persists_document(self) -> None:
+        response = self.client.post(
+            "/parse-prd",
+            json={
+                "prd_text": SAMPLE_PRD.replace("REQ-042", "REQ-777"),
+                "source_format": "markdown",
+                "use_llm": False,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsNotNone(payload["document_id"])
+
+        document = self.client.get(f"/documents/{payload['document_id']}").json()
+        self.assertEqual(document["source_type"], "text")
+        self.assertEqual(document["requirement_id"], "REQ-777")
+        self.assertEqual(document["extraction_method"], "heuristic")
+        self.assertIn("REQ-777", document["prd_text"])
+
+    def test_documents_can_be_filtered(self) -> None:
+        self.client.post(
+            "/upload-file",
+            files={"file": ("filter-me.md", SAMPLE_PRD, "text/markdown")},
+        )
+        listing = self.client.get("/documents", params={"q": "REQ-042"}).json()
+        self.assertGreaterEqual(listing["total"], 1)
+        self.assertEqual(listing["count"], len(listing["documents"]))
+        for document in listing["documents"]:
+            self.assertIn("REQ-042", document["requirement_id"] or "")
+
+    def test_get_missing_document_returns_404(self) -> None:
+        response = self.client.get("/documents/999999")
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_document(self) -> None:
+        upload = self.client.post(
+            "/upload-file",
+            files={"file": ("delete-me.md", SAMPLE_PRD, "text/markdown")},
+        ).json()
+        document_id = upload["results"][0]["document_id"]
+
+        deleted = self.client.delete(f"/documents/{document_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(self.client.get(f"/documents/{document_id}").status_code, 404)
+        self.assertEqual(self.client.delete(f"/documents/{document_id}").status_code, 404)
+
+    def test_clear_documents_requires_confirmation(self) -> None:
+        response = self.client.delete("/documents")
+        self.assertEqual(response.status_code, 400)
+
+        cleared = self.client.delete("/documents", params={"confirm": "true"})
+        self.assertEqual(cleared.status_code, 200)
+        self.assertEqual(self.client.get("/documents").json()["total"], 0)
 
 
 if __name__ == "__main__":

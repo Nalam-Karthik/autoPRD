@@ -13,6 +13,12 @@ venv/
 env/
 ENV/
 
+# Local database (parsed PRD documents)
+data/
+*.db
+*.db-journal
+*.sqlite3
+
 # Environment Variables
 .env
 *.env

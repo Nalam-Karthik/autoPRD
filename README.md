@@ -8,8 +8,10 @@
 2. **Analyzes Python code** using AST parsing to extract structural context
 3. **Generates test prompts** combining PRD requirements with code context
 4. **Validates generated tests** against acceptance criteria and reports coverage gaps
+5. **Persists every parsed document** to SQLite so responses can be reviewed later
 
-The included web UI supports drag-and-drop upload or choosing files from your computer.
+The included web UI supports drag-and-drop upload or choosing files from your computer,
+and shows the stored database responses in a live panel below the upload form.
 
 ## Architecture
 
@@ -79,8 +81,41 @@ uvicorn prd_parser.api:app --reload
 Then open <http://localhost:8000/> to use the autoPRD upload UI. The API docs are at
 <http://localhost:8000/docs>.
 
-The UI can also be served from any static file server; CORS is enabled for local
-origins by default (`AUTOPRD_CORS_ORIGINS` can override the allowed origins).
+The UI can also be served from any static file server. When it is not served by the
+API itself, point it at the API with `?api=http://localhost:8000` (CORS is enabled for
+local origins by default; `AUTOPRD_CORS_ORIGINS` can override the allowed origins).
+
+### Stored responses (SQLite)
+
+Every successful parse is written to a local SQLite database, so you can inspect the
+document responses after the request finishes:
+
+```bash
+# Default location (relative to where you started uvicorn)
+data/autoprd.db
+
+# Override it
+export AUTOPRD_DB_PATH=/absolute/path/to/autoprd.db
+```
+
+Three ways to view the stored responses:
+
+1. **UI** — the "Database responses" panel below the upload form lists every record.
+   Click a row to expand the full JSON, including the extracted PRD text. Use
+   **Refresh** to reload.
+2. **API** — `GET /documents` lists records; `GET /documents/{id}` returns one record.
+   ```bash
+   curl -s "http://localhost:8000/documents?limit=20" | python -m json.tool
+   curl -s "http://localhost:8000/documents/1" | python -m json.tool
+   ```
+3. **SQLite CLI** — query the file directly:
+   ```bash
+   sqlite3 -header -column data/autoprd.db \
+     "select id, filename, requirement_id, extraction_method, created_at from documents;"
+   ```
+
+Records can be removed with `DELETE /documents/{id}` or, for a full reset,
+`DELETE /documents?confirm=true`. The database directory is git-ignored.
 
 ### LLM configuration (optional)
 
@@ -152,7 +187,22 @@ upload/parse endpoints fall back to the deterministic parser automatically.
   - `prd_text`: The PRD text content (required)
   - `source_format`: "pdf" or "markdown" (default: "markdown")
   - `use_llm`: Try LLM extraction first, with deterministic fallback (default: true)
-- **Response**: `requirement_id`, `functional_specification`, `acceptance_criteria`, `edge_case_assumptions`, `source_format`, `extraction_method`
+- **Response**: `requirement_id`, `functional_specification`, `acceptance_criteria`, `edge_case_assumptions`, `source_format`, `extraction_method`, `document_id`
+
+#### `GET /documents`
+- **Description**: List parsed documents stored in SQLite, newest first
+- **Query params**: `limit` (1-500, default 50), `offset` (default 0), `q` (filter by filename, requirement ID, or specification text)
+- **Response**: `total`, `count`, `limit`, `offset`, `database` (absolute DB path), and `documents`. Each document contains its parsed fields, `created_at`, and a `response` object matching the live parse response.
+
+#### `GET /documents/{document_id}`
+- **Description**: Read one stored document, including the extracted `prd_text`
+- **Response**: The document record, or HTTP 404 when the id does not exist.
+
+#### `DELETE /documents/{document_id}`
+- **Description**: Delete one stored document. Returns `{"deleted": id}` or HTTP 404.
+
+#### `DELETE /documents`
+- **Description**: Delete every stored document. Requires `?confirm=true`, otherwise HTTP 400.
 
 #### `POST /upload-file`
 - **Description**: Upload one or more PDF/Markdown PRD files and parse each one.
@@ -163,6 +213,7 @@ upload/parse endpoints fall back to the deterministic parser automatically.
 {
   "processed": 1,
   "failed": 0,
+  "stored": 1,
   "results": [
     {
       "filename": "login.md",
@@ -171,7 +222,9 @@ upload/parse endpoints fall back to the deterministic parser automatically.
       "acceptance_criteria": ["Given valid credentials, then a session is created."],
       "edge_case_assumptions": [{"assumption": "Users may be offline.", "context": "", "impact": ""}],
       "source_format": "markdown",
-      "word_count": 42
+      "extraction_method": "heuristic",
+      "word_count": 42,
+      "document_id": 1
     }
   ],
   "errors": []
@@ -287,7 +340,9 @@ outputs:
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-The system uses file-based caching (`.cache/` directory) by default, with keys generated from request parameters. To use Redis, replace the cache functions in `prd_parser/api.py` with Redis operations.
+The system stores every parsed document in SQLite at `data/autoprd.db` (override with
+`AUTOPRD_DB_PATH`) and exposes it through `GET /documents`. The test suite points the
+database at a temporary directory so local data is never touched.
 
 ## Project Structure
 
@@ -308,6 +363,7 @@ The system uses file-based caching (`.cache/` directory) by default, with keys g
     ├── main.py             # Library/CLI entry points
     ├── models.py           # Data models and schemas
     ├── parsers.py          # PDF/Markdown PRD parsers
+    ├── storage.py          # SQLite persistence for parsed documents
     └── verifier.py         # Coverage verification
 ```
 

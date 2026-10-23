@@ -542,11 +542,174 @@
       border-color: rgba(248, 113, 113, 0.4);
     }
 
+    /* ------------------------------------------------ database responses */
+
+    .db-panel {
+      margin-top: 2.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      background: rgba(23, 32, 51, 0.85);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .db-panel__head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem 1.15rem;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.7);
+    }
+
+    .db-panel__title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--fg);
+    }
+
+    .db-panel__path {
+      margin-top: 0.25rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.71rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+
+    .db-panel__actions {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    .db-panel__count {
+      font-size: 0.75rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .db-panel__refresh {
+      padding: 0.45rem 0.8rem;
+      font-size: 0.78rem;
+    }
+
+    .db-panel__empty {
+      padding: 1.4rem 1.15rem;
+      font-size: 0.83rem;
+      color: var(--muted);
+    }
+
+    .db-panel__empty[hidden] {
+      display: none;
+    }
+
+    .db-list {
+      list-style: none;
+    }
+
+    .db-item + .db-item {
+      border-top: 1px solid rgba(51, 65, 85, 0.45);
+    }
+
+    .db-item__toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.85rem;
+      width: 100%;
+      padding: 0.8rem 1.15rem;
+      border: 0;
+      background: none;
+      font: inherit;
+      color: inherit;
+      text-align: left;
+      cursor: pointer;
+      transition: background 0.2s ease;
+    }
+
+    .db-item__toggle:hover {
+      background: rgba(51, 65, 85, 0.32);
+    }
+
+    .db-item__toggle:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
+
+    .db-item__id {
+      flex: 0 0 auto;
+      padding: 0.2rem 0.42rem;
+      border: 1px solid rgba(96, 165, 250, 0.25);
+      border-radius: 6px;
+      background: rgba(59, 130, 246, 0.14);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.7rem;
+      color: #93c5fd;
+    }
+
+    .db-item__main {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .db-item__file {
+      display: block;
+      font-size: 0.86rem;
+      font-weight: 500;
+      color: var(--fg);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .db-item__meta {
+      display: block;
+      margin-top: 0.15rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .db-item__chevron {
+      flex: 0 0 auto;
+      font-size: 0.8rem;
+      color: var(--muted);
+      transition: transform 0.2s ease;
+    }
+
+    .db-item__toggle[aria-expanded="true"] .db-item__chevron {
+      transform: rotate(180deg);
+    }
+
+    .db-item__json {
+      max-height: 420px;
+      margin: 0;
+      padding: 0.25rem 1.15rem 1.15rem;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem;
+      line-height: 1.55;
+      color: #cbd5e1;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .db-item__json[hidden] {
+      display: none;
+    }
+
     @media (max-width: 560px) {
       .container {
         padding: 2.25rem 1.1rem 3rem;
       }
 
+      .db-panel__head {
+        flex-direction: column;
+        align-items: flex-start;
+      }
       .logo {
         width: 124px;
         height: 124px;
@@ -645,6 +808,25 @@
     </div>
 
     <div class="status" id="status" role="status" aria-live="polite" hidden></div>
+
+    <section class="db-panel" id="dbPanel" aria-labelledby="dbTitle">
+      <div class="db-panel__head">
+        <div>
+          <h2 class="db-panel__title" id="dbTitle">Database responses</h2>
+          <p class="db-panel__path" id="dbPath">SQLite · data/autoprd.db</p>
+        </div>
+        <div class="db-panel__actions">
+          <span class="db-panel__count" id="dbCount">Loading…</span>
+          <button type="button" class="btn btn--ghost db-panel__refresh" id="dbRefresh">
+            Refresh
+          </button>
+        </div>
+      </div>
+      <p class="db-panel__empty" id="dbEmpty" hidden>
+        No documents stored yet. Upload a PRD to create the first record.
+      </p>
+      <ul class="db-list" id="dbList"></ul>
+    </section>
   </div>
 
   <script>
@@ -657,13 +839,22 @@
     const clearBtn = document.getElementById('clearBtn');
     const submitBtn = document.getElementById('submitBtn');
     const statusEl = document.getElementById('status');
+    const dbList = document.getElementById('dbList');
+    const dbCount = document.getElementById('dbCount');
+    const dbPath = document.getElementById('dbPath');
+    const dbEmpty = document.getElementById('dbEmpty');
+    const dbRefresh = document.getElementById('dbRefresh');
 
     const ACCEPTED_EXTENSIONS = ['.pdf', '.md', '.markdown'];
     const SUBMIT_LABEL = submitBtn.textContent;
-    const API_BASE =
-      window.location.port === '8000'
-        ? window.location.origin
-        : 'http://localhost:8000';
+    // When the API serves this page, use the same origin (works on any port).
+    // For static hosting, pass ?api=http://localhost:8000 to point at the API.
+    const API_BASE = (() => {
+      if (window.location.protocol === 'file:') return 'http://localhost:8000';
+      const override = new URLSearchParams(window.location.search).get('api');
+      if (override) return override.replace(/\/+$/, '');
+      return window.location.origin;
+    })();
 
     let selectedFiles = [];
     let dragDepth = 0;
@@ -820,6 +1011,124 @@
       }
     }
 
+    /* ------------------------------------------------------ database panel */
+
+    function documentLabel(doc) {
+      return doc.filename || `Text input #${doc.id}`;
+    }
+
+    function documentMeta(doc) {
+      const parts = [
+        doc.requirement_id || 'no requirement ID',
+        doc.source_format,
+        doc.extraction_method,
+        `${doc.acceptance_criteria.length} criteria`,
+        `${doc.word_count} words`,
+        doc.created_at,
+      ];
+      return parts.filter(Boolean).join(' · ');
+    }
+
+    async function toggleDocument(toggle, pre, documentId) {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+
+      if (expanded) {
+        toggle.setAttribute('aria-expanded', 'false');
+        pre.hidden = true;
+        return;
+      }
+
+      toggle.setAttribute('aria-expanded', 'true');
+      pre.hidden = false;
+
+      if (pre.dataset.loaded === 'true') return;
+
+      pre.textContent = 'Loading from database…';
+      try {
+        const response = await fetch(`${API_BASE}/documents/${documentId}`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const detail = await response.json();
+        pre.textContent = JSON.stringify(detail, null, 2);
+        pre.dataset.loaded = 'true';
+      } catch (error) {
+        pre.textContent = `Could not read document #${documentId}: ${error.message}`;
+      }
+    }
+
+    function renderDocuments(data) {
+      dbList.textContent = '';
+      dbCount.textContent = `${data.total} record${data.total === 1 ? '' : 's'}`;
+      if (data.database) dbPath.textContent = `SQLite · ${data.database}`;
+
+      if (!data.documents || data.documents.length === 0) {
+        dbEmpty.hidden = false;
+        dbEmpty.textContent = 'No documents stored yet. Upload a PRD to create the first record.';
+        return;
+      }
+
+      dbEmpty.hidden = true;
+
+      data.documents.forEach((doc) => {
+        const item = document.createElement('li');
+        item.className = 'db-item';
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'db-item__toggle';
+        toggle.setAttribute('aria-expanded', 'false');
+
+        const id = document.createElement('span');
+        id.className = 'db-item__id';
+        id.textContent = `#${doc.id}`;
+
+        const main = document.createElement('span');
+        main.className = 'db-item__main';
+
+        const file = document.createElement('span');
+        file.className = 'db-item__file';
+        file.textContent = documentLabel(doc);
+
+        const meta = document.createElement('span');
+        meta.className = 'db-item__meta';
+        meta.textContent = documentMeta(doc);
+
+        main.append(file, meta);
+
+        const chevron = document.createElement('span');
+        chevron.className = 'db-item__chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+        chevron.textContent = '\u25be';
+
+        toggle.append(id, main, chevron);
+
+        const pre = document.createElement('pre');
+        pre.className = 'db-item__json';
+        pre.hidden = true;
+
+        toggle.addEventListener('click', () => toggleDocument(toggle, pre, doc.id));
+
+        item.append(toggle, pre);
+        dbList.append(item);
+      });
+    }
+
+    async function loadDocuments() {
+      dbRefresh.disabled = true;
+      try {
+        const response = await fetch(`${API_BASE}/documents?limit=50`);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        renderDocuments(await response.json());
+      } catch (error) {
+        dbCount.textContent = 'Unavailable';
+        dbEmpty.hidden = false;
+        dbEmpty.textContent = `Could not load stored documents: ${error.message}`;
+      } finally {
+        dbRefresh.disabled = false;
+      }
+    }
+
+    dbRefresh.addEventListener('click', loadDocuments);
+
     /* ------------------------------------------------------- drag and drop */
 
     function hasFiles(event) {
@@ -951,9 +1260,10 @@
             failed > 0 ? 'error' : 'success',
             failed > 0
               ? `Parsed ${processed} ${noun}, but ${failed} failed`
-              : `Parsed ${processed} ${noun} successfully`,
+              : `Parsed and stored ${processed} ${noun}`,
             result
           );
+          loadDocuments();
         } else {
           const detail =
             result && Array.isArray(result.errors) && result.errors.length > 0
@@ -968,6 +1278,8 @@
         submitBtn.disabled = selectedFiles.length === 0;
       }
     });
+
+    loadDocuments();
   </script>
 </body>
 </html>

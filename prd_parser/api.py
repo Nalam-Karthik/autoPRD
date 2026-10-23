@@ -6,19 +6,22 @@ Exposes endpoints:
 - POST /upload-file: Upload one or more PRD files (PDF/Markdown)
 - POST /generate-functional-tests: Generate functional test prompts
 - POST /validate-code: Validate generated tests against PRD acceptance criteria
+- GET  /documents: List stored document responses from the database
+- GET  /documents/{document_id}: Read one stored document response
+- DELETE /documents/{document_id}: Delete one stored document
+- DELETE /documents: Clear every stored document
 - GET  /health: Health check
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -33,6 +36,7 @@ from prd_parser.models import (
     PRDExtraction,
 )
 from prd_parser.parsers import MarkdownPRDParser, PDFPRDParser
+from prd_parser import storage
 from prd_parser.verifier import verify
 
 # ---------------------------------------------------------------------------
@@ -46,38 +50,6 @@ if not logger.handlers:
         logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     )
     logger.addHandler(handler)
-
-# ---------------------------------------------------------------------------
-# Caching (file-based; Redis-ready design)
-# ---------------------------------------------------------------------------
-CACHE_DIR = Path(".cache")
-CACHE_DIR.mkdir(exist_ok=True)
-
-
-def _cache_key(prefix: str, *parts: str) -> str:
-    """Generate a deterministic cache key from parts."""
-    return f"{prefix}:{':'.join(parts)}"
-
-
-def _read_cache(key: str) -> Optional[Dict[str, Any]]:
-    """Read cached result from disk."""
-    cache_file = CACHE_DIR / f"{key}.json"
-    if cache_file.exists():
-        try:
-            return json.loads(cache_file.read_text(encoding="utf-8"))
-        except Exception as e:
-            logger.warning(f"Cache read error for {key}: {e}")
-    return None
-
-
-def _write_cache(key: str, data: Dict[str, Any]) -> None:
-    """Write result to disk cache."""
-    cache_file = CACHE_DIR / f"{key}.json"
-    try:
-        cache_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    except Exception as e:
-        logger.warning(f"Cache write error for {key}: {e}")
-
 
 # ---------------------------------------------------------------------------
 # Request DTOs
@@ -351,6 +323,15 @@ def _parse_prd_with_fallback(
     return _parse_prd_text(prd_text, source_format), "heuristic"
 
 
+def _store_parsed_document(**fields: Any) -> Optional[int]:
+    """Persist a parsed PRD and return its database id (None on failure)."""
+    try:
+        return storage.save_document(**fields)["id"]
+    except Exception as exc:  # pragma: no cover - disk/permission failures
+        logger.error("Could not persist parsed document: %s", exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Code/test helpers
 # ---------------------------------------------------------------------------
@@ -481,6 +462,20 @@ async def parse_prd_endpoint(
         request.prd_text, request.source_format, request.use_llm
     )
     result["extraction_method"] = method
+
+    stored_id = _store_parsed_document(
+        filename=None,
+        source_type="text",
+        source_format=request.source_format,
+        requirement_id=result["requirement_id"],
+        functional_specification=result["functional_specification"],
+        acceptance_criteria=result["acceptance_criteria"],
+        edge_case_assumptions=result["edge_case_assumptions"],
+        extraction_method=method,
+        word_count=len(request.prd_text.split()),
+        prd_text=request.prd_text,
+    )
+    result["document_id"] = stored_id
     return result
 
 
@@ -579,22 +574,89 @@ async def upload_file_endpoint(
             continue
 
         parsed_fields = _parse_prd_text(parsed.text, parsed.source_format)
+        stored_id = _store_parsed_document(
+            filename=filename,
+            source_type="upload",
+            source_format=parsed.source_format,
+            requirement_id=parsed_fields["requirement_id"],
+            functional_specification=parsed_fields["functional_specification"],
+            acceptance_criteria=parsed_fields["acceptance_criteria"],
+            edge_case_assumptions=parsed_fields["edge_case_assumptions"],
+            extraction_method="heuristic",
+            word_count=parsed.word_count,
+            page_count=parsed.pages,
+            prd_text=parsed.text,
+        )
         results.append(
             {
                 **parsed_fields,
+                "extraction_method": "heuristic",
                 "filename": filename,
                 "word_count": parsed.word_count,
+                "document_id": stored_id,
             }
         )
 
     payload = {
         "processed": len(results),
         "failed": len(errors),
+        "stored": len(results),
         "results": results,
         "errors": errors,
     }
     status_code = 200 if results else 400
     return JSONResponse(content=payload, status_code=status_code)
+
+
+@app.get("/documents", summary="List stored document responses from the database")
+async def list_documents_endpoint(
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    q: Optional[str] = Query(
+        default=None, description="Filter by filename, requirement ID, or spec text"
+    ),
+) -> Dict[str, Any]:
+    """Return parsed PRD documents persisted in SQLite, newest first."""
+    documents = storage.list_documents(limit=limit, offset=offset, query=q)
+    return {
+        "total": storage.count_documents(query=q),
+        "count": len(documents),
+        "limit": limit,
+        "offset": offset,
+        "database": str(storage.database_path().resolve()),
+        "documents": documents,
+    }
+
+
+@app.get("/documents/{document_id}", summary="Read one stored document response")
+async def get_document_endpoint(document_id: int) -> Dict[str, Any]:
+    """Return one stored document, including the extracted PRD text."""
+    document = storage.get_document(document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return document
+
+
+@app.delete("/documents/{document_id}", summary="Delete one stored document")
+async def delete_document_endpoint(document_id: int) -> Dict[str, Any]:
+    """Delete one stored document by id."""
+    if not storage.delete_document(document_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"deleted": document_id}
+
+
+@app.delete("/documents", summary="Clear every stored document")
+async def clear_documents_endpoint(
+    confirm: bool = Query(default=False, description="Must be true to clear the table"),
+) -> Dict[str, Any]:
+    """Delete every stored document. Requires ``?confirm=true``."""
+    if not confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Pass ?confirm=true to delete every stored document.",
+        )
+    deleted = storage.clear_documents()
+    return {"deleted": deleted}
 
 
 @app.get("/health", summary="Health check")
