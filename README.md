@@ -64,7 +64,7 @@ pip install -e .
 
 ```text
 fastapi>=0.110,<1.0
-uvicorn>=0.27
+uvicorn[standard]>=0.27
 pydantic>=2.5
 python-multipart>=0.0.9
 pdfplumber>=0.10
@@ -116,6 +116,40 @@ Three ways to view the stored responses:
 
 Records can be removed with `DELETE /documents/{id}` or, for a full reset,
 `DELETE /documents?confirm=true`. The database directory is git-ignored.
+
+### Docker
+
+A `Dockerfile` and `docker-compose.yml` are included:
+
+```bash
+docker compose up --build -d
+```
+
+Open <http://localhost:8000/>. To use another host port:
+
+```bash
+AUTOPRD_PORT=8080 docker compose up --build -d
+```
+
+Compose reads LLM credentials from the `.env` file in this directory and injects
+them into the container. Without credentials the API still runs and uses the
+deterministic parser.
+
+Parsed documents persist in the `autoprd-data` named volume at
+`/app/data/autoprd.db`. The image includes the `sqlite3` CLI:
+
+```bash
+docker compose exec autoprd sqlite3 -header -column /app/data/autoprd.db \
+  "select id, filename, requirement_id, created_at from documents;"
+
+# copy the database to the host instead
+docker compose cp autoprd:/app/data/autoprd.db ./autoprd.db
+```
+
+Useful commands: `docker compose logs -f`, `docker compose down` (keeps data),
+`docker compose down -v` (also deletes the volume). To keep the database in a
+local `./data` directory instead, replace the volume in `docker-compose.yml`
+with `- ./data:/app/data` and run the service as `user: "${UID}:${GID}"`.
 
 ### LLM configuration (optional)
 
@@ -349,6 +383,8 @@ database at a temporary directory so local data is never touched.
 ```
 .
 ├── index.html              # autoPRD web UI (drag & drop + file picker)
+├── Dockerfile              # Container image (Python 3.12 + sqlite3 CLI)
+├── docker-compose.yml      # Single-service stack with a persistent data volume
 ├── pyproject.toml
 ├── requirements.txt
 ├── tests/

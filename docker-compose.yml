@@ -1,0 +1,33 @@
+services:
+  autoprd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: autoprd:local
+    container_name: autoprd
+    init: true
+    ports:
+      - "${AUTOPRD_PORT:-8000}:8000"
+    environment:
+      # Persisted SQLite database (named volume below).
+      AUTOPRD_DB_PATH: /app/data/autoprd.db
+      AUTOPRD_CORS_ORIGINS: ${AUTOPRD_CORS_ORIGINS:-*}
+      # Optional LLM settings. Compose reads values from the .env file in this
+      # directory; empty values make the API fall back to the deterministic parser.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      PRD_LLM_MODEL: ${PRD_LLM_MODEL:-}
+      # Do not set GEMINI_BASE_URL to an empty value: the app would treat that as
+      # a real (empty) base URL. Add it only when pointing at a custom endpoint:
+      # GEMINI_BASE_URL: https://generativelanguage.googleapis.com/v1beta/openai/
+    volumes:
+      - autoprd-data:/app/data
+      # To inspect the database directly on the host instead of a named volume:
+      # - ./data:/app/data
+      # (run with user: "${UID}:${GID}" so the container can write to it)
+    restart: unless-stopped
+    stop_grace_period: 10s
+
+volumes:
+  autoprd-data:
